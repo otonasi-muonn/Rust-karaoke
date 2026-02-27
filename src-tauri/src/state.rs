@@ -1,18 +1,45 @@
 /// Application state management
 /// Thread-safe shared state for the karaoke system
-use crate::commands::ScoreResult;
+use crate::types::ScoreResult;
+use serde::Serialize;
 use std::sync::Mutex;
+use tauri::{AppHandle, Emitter};
 
 /// Represents a single pitch data point from the reference track
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct PitchPoint {
     pub time_ms: f64,
     pub pitch_hz: f64,
     pub is_voiced: bool,
 }
 
+/// Event payload: real-time pitch data pushed to frontend
+#[derive(Clone, Debug, Serialize)]
+pub struct PitchUpdateEvent {
+    pub time_ms: f64,
+    pub user_pitch_hz: f64,
+    pub ref_pitch_hz: f64,
+    pub is_voiced: bool,
+    pub judgement: String,
+    pub diff_cents: f64,
+}
+
+/// Event payload: score snapshot pushed to frontend
+#[derive(Clone, Debug, Serialize)]
+pub struct ScoreUpdateEvent {
+    pub current_score: f64,
+    pub judgement: String,
+    pub total_frames: u64,
+    pub perfect_count: u64,
+    pub great_count: u64,
+    pub good_count: u64,
+    pub miss_count: u64,
+}
+
 /// Main application state shared across threads
 pub struct AppState {
+    /// Tauri AppHandle for emitting events to the frontend
+    app_handle: Mutex<Option<AppHandle>>,
     /// Analysis progress tracking
     progress: Mutex<(String, f64, String)>,
     /// Reference pitch data from analyzed song
@@ -74,6 +101,7 @@ impl AppState {
     pub fn new() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
         Self {
+            app_handle: Mutex::new(None),
             progress: Mutex::new(("idle".to_string(), 0.0, "待機中".to_string())),
             reference_pitches: Mutex::new(Vec::new()),
             accompaniment: Mutex::new(Vec::new()),
@@ -83,6 +111,44 @@ impl AppState {
             playback_start_ms: Mutex::new(None),
             mic_pitch_receiver: Mutex::new(Some(rx)),
             mic_pitch_sender: Mutex::new(Some(tx)),
+        }
+    }
+
+    /// Store the Tauri AppHandle for event emission
+    pub fn set_app_handle(&self, handle: AppHandle) {
+        let mut h = self.app_handle.lock().unwrap();
+        *h = Some(handle);
+    }
+
+    /// Emit a Tauri event to the frontend
+    pub fn emit_pitch_update(&self, event: PitchUpdateEvent) {
+        if let Some(ref handle) = *self.app_handle.lock().unwrap() {
+            let _ = handle.emit("pitch-update", event);
+        }
+    }
+
+    /// Emit score update event to the frontend
+    pub fn emit_score_update(&self) {
+        if let Some(ref handle) = *self.app_handle.lock().unwrap() {
+            let s = self.score_state.lock().unwrap();
+            let total = s.total_frames.max(1) as f64;
+            let score = (s.perfect_count as f64 * 100.0
+                + s.great_count as f64 * 75.0
+                + s.good_count as f64 * 50.0)
+                / (total * 100.0)
+                * 100.0;
+            let _ = handle.emit(
+                "score-update",
+                ScoreUpdateEvent {
+                    current_score: score,
+                    judgement: s.last_judgement.clone(),
+                    total_frames: s.total_frames,
+                    perfect_count: s.perfect_count,
+                    great_count: s.great_count,
+                    good_count: s.good_count,
+                    miss_count: s.miss_count,
+                },
+            );
         }
     }
 

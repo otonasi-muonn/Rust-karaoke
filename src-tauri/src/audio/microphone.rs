@@ -78,6 +78,7 @@ pub fn start_capture(state: &Arc<AppState>) -> Result<()> {
         let mut buffer = vec![0.0f32; chunk_size];
         let mut time_offset = 0.0f64;
         let hop_ms = 40.0; // 40ms hop
+        let mut event_counter = 0u64;
 
         while MIC_RUNNING.load(Ordering::Relaxed) && state_clone.is_playing() {
             // Collect enough samples
@@ -113,12 +114,31 @@ pub fn start_capture(state: &Arc<AppState>) -> Result<()> {
                         is_voiced,
                     };
 
-                    // Score this frame
+                    // Score this frame and emit events to frontend
                     let ref_pitches = state_clone.get_reference_pitches();
-                    if !ref_pitches.is_empty() && is_voiced {
-                        let (judgement, diff, ref_hz) =
+                    let (judgement, diff, ref_hz) = if !ref_pitches.is_empty() && is_voiced {
+                        let (j, d, r) =
                             crate::scoring::score_frame(elapsed, pitch_hz, &ref_pitches);
-                        state_clone.update_score(&judgement, pitch_hz, ref_hz, diff);
+                        state_clone.update_score(&j, pitch_hz, r, d);
+                        (j, d, r)
+                    } else {
+                        ("Miss".to_string(), f64::MAX, 0.0)
+                    };
+
+                    // Emit pitch-update event to frontend (every frame)
+                    state_clone.emit_pitch_update(crate::state::PitchUpdateEvent {
+                        time_ms: elapsed,
+                        user_pitch_hz: pitch_hz,
+                        ref_pitch_hz: ref_hz,
+                        is_voiced,
+                        judgement: judgement.clone(),
+                        diff_cents: if diff == f64::MAX { -1.0 } else { diff },
+                    });
+
+                    // Emit score-update event every 5 frames (~200ms) to avoid flooding
+                    event_counter += 1;
+                    if event_counter % 5 == 0 {
+                        state_clone.emit_score_update();
                     }
 
                     let _ = sender.try_send(data);
@@ -131,6 +151,8 @@ pub fn start_capture(state: &Arc<AppState>) -> Result<()> {
             time_offset += hop_ms;
         }
 
+        // Emit final score update
+        state_clone.emit_score_update();
         log::info!("Inference thread stopped");
     });
 

@@ -1,10 +1,12 @@
 /**
  * Rust Karaoke - Frontend Application
- * Canvas-based pitch visualization with Tauri IPC
+ * Canvas-based pitch visualization with Tauri event listeners
+ * Plan2 Phase 6: Event-driven architecture using listen()
  */
 
 // ---- Tauri API ----
 const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 const { getCurrentWindow } = window.__TAURI__.window;
 
 // ---- DOM Elements ----
@@ -42,8 +44,11 @@ let state = {
   referencePitches: [],
   durationMs: 0,
   animationFrame: null,
-  scorePolling: null,
-  userPitchHistory: [], // { time_ms, pitch_hz }
+  userPitchHistory: [], // { time_ms, pitch_hz, judgement }
+  latestScore: null,     // Latest score snapshot from backend event
+  playbackStartTime: 0,  // performance.now() when playback started
+  unlistenPitch: null,    // Unlisten handle for pitch-update
+  unlistenScore: null,    // Unlisten handle for score-update
 };
 
 // ---- Canvas Renderer ----
@@ -271,35 +276,57 @@ async function pollProgress() {
   }
 }
 
-// ---- Score Polling ----
-async function pollScore() {
-  if (!state.isPlaying) return;
-  try {
-    const score = await invoke('get_score');
-    dom.scoreValue.textContent = score.current_score.toFixed(1);
-    dom.perfectCount.textContent = score.perfect_count;
-    dom.greatCount.textContent = score.great_count;
-    dom.goodCount.textContent = score.good_count;
-    dom.missCount.textContent = score.miss_count;
+// ---- Score Polling (removed: now event-driven) ----
 
-    updateJudgement(score.judgement);
-    dom.currentNote.textContent = hzToNoteName(score.user_pitch_hz);
-    dom.pitchHz.textContent = score.user_pitch_hz > 0 ? score.user_pitch_hz.toFixed(1) + ' Hz' : '---';
+// ---- Tauri Event Listeners ----
+async function setupEventListeners() {
+  // Listen for real-time pitch updates from the inference thread
+  state.unlistenPitch = await listen('pitch-update', (event) => {
+    const p = event.payload;
 
-    // Add to user pitch history
-    if (score.user_pitch_hz > 0) {
-      const now = performance.now(); // Approximate timing
+    // Add to user pitch history for Canvas rendering
+    if (p.is_voiced && p.user_pitch_hz > 0) {
       state.userPitchHistory.push({
-        time_ms: now,
-        pitch_hz: score.user_pitch_hz,
-        judgement: score.judgement,
+        time_ms: p.time_ms,
+        pitch_hz: p.user_pitch_hz,
+        judgement: p.judgement,
       });
       // Trim old entries (keep last 30 seconds)
-      const cutoff = now - 30000;
-      state.userPitchHistory = state.userPitchHistory.filter(p => p.time_ms > cutoff);
+      const cutoffMs = p.time_ms - 30000;
+      while (state.userPitchHistory.length > 0 && state.userPitchHistory[0].time_ms < cutoffMs) {
+        state.userPitchHistory.shift();
+      }
     }
-  } catch (e) {
-    console.error('Score poll error:', e);
+
+    // Update current note display
+    dom.currentNote.textContent = hzToNoteName(p.user_pitch_hz);
+    dom.pitchHz.textContent = p.user_pitch_hz > 0 ? p.user_pitch_hz.toFixed(1) + ' Hz' : '---';
+
+    // Update judgement display
+    updateJudgement(p.judgement);
+  });
+
+  // Listen for score snapshot updates (~every 200ms)
+  state.unlistenScore = await listen('score-update', (event) => {
+    const s = event.payload;
+    state.latestScore = s;
+
+    dom.scoreValue.textContent = s.current_score.toFixed(1);
+    dom.perfectCount.textContent = s.perfect_count;
+    dom.greatCount.textContent = s.great_count;
+    dom.goodCount.textContent = s.good_count;
+    dom.missCount.textContent = s.miss_count;
+  });
+}
+
+function teardownEventListeners() {
+  if (state.unlistenPitch) {
+    state.unlistenPitch();
+    state.unlistenPitch = null;
+  }
+  if (state.unlistenScore) {
+    state.unlistenScore();
+    state.unlistenScore = null;
   }
 }
 
@@ -308,8 +335,17 @@ let startTime = 0;
 
 function animationLoop(timestamp) {
   if (!state.isPlaying) return;
-  const elapsed = timestamp - startTime;
-  renderer.draw(elapsed);
+
+  // Use backend-synced time: the latest pitch event time_ms is the true playback position
+  let currentTimeMs;
+  if (state.userPitchHistory.length > 0) {
+    currentTimeMs = state.userPitchHistory[state.userPitchHistory.length - 1].time_ms;
+  } else {
+    // Fallback to client-side estimate
+    currentTimeMs = timestamp - startTime;
+  }
+
+  renderer.draw(currentTimeMs);
   state.animationFrame = requestAnimationFrame(animationLoop);
 }
 
@@ -357,17 +393,21 @@ dom.url.addEventListener('keydown', (e) => {
 // Start karaoke
 dom.btnStart.addEventListener('click', async () => {
   try {
+    // Set up event listeners BEFORE starting karaoke
+    await setupEventListeners();
+
     await invoke('start_karaoke');
     state.isPlaying = true;
     state.userPitchHistory = [];
+    state.latestScore = null;
     dom.btnStart.classList.add('hidden');
     dom.btnStop.classList.remove('hidden');
 
     startTime = performance.now();
     state.animationFrame = requestAnimationFrame(animationLoop);
-    state.scorePolling = setInterval(pollScore, 50); // 20Hz polling
   } catch (e) {
     console.error('Start error:', e);
+    teardownEventListeners();
     alert('開始エラー: ' + e);
   }
 });
@@ -381,7 +421,7 @@ dom.btnStop.addEventListener('click', async () => {
   }
   state.isPlaying = false;
   cancelAnimationFrame(state.animationFrame);
-  clearInterval(state.scorePolling);
+  teardownEventListeners();
   dom.btnStop.classList.add('hidden');
   dom.btnStart.classList.remove('hidden');
 });
