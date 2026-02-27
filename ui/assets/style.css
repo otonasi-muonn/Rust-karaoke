@@ -113,7 +113,19 @@ html, body {
   align-items: center;
   justify-content: center;
   flex: 1;
-  gap: 20px;
+  gap: 16px;
+}
+
+#input-heading {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+#input-hint {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .url-input-group {
@@ -312,7 +324,6 @@ html, body {
 .score-label {
   font-size: 11px;
   color: var(--text-muted);
-  text-transform: uppercase;
   letter-spacing: 1px;
 }
 
@@ -352,7 +363,6 @@ html, body {
 .score-item .label {
   font-size: 10px;
   color: var(--text-muted);
-  text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 

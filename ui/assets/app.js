@@ -320,8 +320,15 @@ function showSection(section) {
   }
 }
 
+const judgementLabels = {
+  'Perfect': '完璧',
+  'Great': '素晴らしい',
+  'Good': '良い',
+  'Miss': 'ミス',
+};
+
 function updateJudgement(judgement) {
-  dom.judgementText.textContent = judgement;
+  dom.judgementText.textContent = judgementLabels[judgement] || judgement;
   dom.judgementText.className = 'judgement-' + judgement.toLowerCase();
 }
 
@@ -424,7 +431,7 @@ dom.btnAnalyze.addEventListener('click', async () => {
   dom.btnAnalyze.disabled = true;
   dom.progressContainer.classList.remove('hidden');
   dom.progressFill.style.width = '0%';
-  dom.progressText.textContent = '解析開始...';
+  dom.progressText.textContent = '解析を開始しています...';
 
   progressInterval = setInterval(pollProgress, 500);
 
@@ -435,14 +442,14 @@ dom.btnAnalyze.addEventListener('click', async () => {
 
     clearInterval(progressInterval);
     dom.progressFill.style.width = '100%';
-    dom.progressText.textContent = '解析完了！';
+    dom.progressText.textContent = '解析完了！カラオケの準備ができました';
 
     setTimeout(() => {
       showSection('karaoke');
     }, 500);
   } catch (e) {
     clearInterval(progressInterval);
-    dom.progressText.textContent = 'エラー: ' + e;
+    dom.progressText.textContent = '解析エラー: ' + e;
     dom.progressFill.style.width = '0%';
     console.error('Analysis error:', e);
   } finally {
@@ -473,7 +480,7 @@ dom.btnStart.addEventListener('click', async () => {
   } catch (e) {
     console.error('Start error:', e);
     teardownEventListeners();
-    alert('開始エラー: ' + e);
+    alert('カラオケの開始に失敗しました: ' + e);
   }
 });
 

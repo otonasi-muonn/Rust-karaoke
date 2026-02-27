@@ -7,11 +7,11 @@
   <link rel="stylesheet" href="assets/style.css" />
 </head>
 <body>
-  <!-- Custom title bar (borderless window) -->
-  <header id="titlebar" data-tauri-drag-region>
+    <!-- カスタムタイトルバー（ボーダーレスウィンドウ） -->
+    <header id="titlebar" data-tauri-drag-region>
     <div class="titlebar-left" data-tauri-drag-region>
       <span class="app-icon">🎤</span>
-      <span class="app-title" data-tauri-drag-region>Rust Karaoke</span>
+      <span class="app-title" data-tauri-drag-region>Rust カラオケ</span>
     </div>
     <div class="titlebar-controls">
       <button id="btn-pip" class="titlebar-btn" title="PiPモード">⊞</button>
@@ -22,12 +22,14 @@
   </header>
 
   <main id="app">
-    <!-- URL Input Section -->
+    <!-- URL入力セクション -->
     <section id="input-section">
+      <h2 id="input-heading">🎵 歌いたい曲のURLを貼り付けてください</h2>
       <div class="url-input-group">
         <input type="text" id="youtube-url" placeholder="YouTube URLを入力..." autocomplete="off" />
-        <button id="btn-analyze" class="btn-primary">解析</button>
+        <button id="btn-analyze" class="btn-primary">解析開始</button>
       </div>
+      <p id="input-hint">YouTubeの楽曲URLを入力すると、AIが自動で音源分離・ピッチ解析を行います</p>
       <div id="progress-bar-container" class="hidden">
         <div id="progress-bar">
           <div id="progress-fill"></div>
@@ -57,18 +59,18 @@
           <span id="judgement-text" class="judgement-miss">---</span>
         </div>
         <div id="score-breakdown">
-          <div class="score-item perfect"><span class="count" id="perfect-count">0</span><span class="label">Perfect</span></div>
-          <div class="score-item great"><span class="count" id="great-count">0</span><span class="label">Great</span></div>
-          <div class="score-item good"><span class="count" id="good-count">0</span><span class="label">Good</span></div>
-          <div class="score-item miss"><span class="count" id="miss-count">0</span><span class="label">Miss</span></div>
+          <div class="score-item perfect"><span class="count" id="perfect-count">0</span><span class="label">完璧</span></div>
+          <div class="score-item great"><span class="count" id="great-count">0</span><span class="label">素晴らしい</span></div>
+          <div class="score-item good"><span class="count" id="good-count">0</span><span class="label">良い</span></div>
+          <div class="score-item miss"><span class="count" id="miss-count">0</span><span class="label">ミス</span></div>
         </div>
       </div>
 
-      <!-- Controls -->
+      <!-- 操作ボタン -->
       <div id="controls">
-        <button id="btn-start" class="btn-primary btn-large">▶ スタート</button>
-        <button id="btn-stop" class="btn-danger btn-large hidden">■ ストップ</button>
-        <button id="btn-back" class="btn-secondary">← 戻る</button>
+        <button id="btn-start" class="btn-primary btn-large">▶ 歌い始める</button>
+        <button id="btn-stop" class="btn-danger btn-large hidden">■ 終了する</button>
+        <button id="btn-back" class="btn-secondary">← 曲選択に戻る</button>
       </div>
     </section>
   </main>
