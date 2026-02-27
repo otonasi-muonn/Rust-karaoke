@@ -10,10 +10,11 @@ src-tauri/gen/schemas/
 src-tauri/.tauri/
 
 # ===========================
-# ONNX models (large binary files)
+# ONNX models & conversion cache (large binary files)
 # ===========================
 src-tauri/models/*.onnx
 src-tauri/models/*.bin
+src-tauri/models/.cache/
 
 # ===========================
 # Node.js
