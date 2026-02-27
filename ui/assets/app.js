@@ -151,39 +151,83 @@ class PitchRenderer {
     const startTime = currentTimeMs - halfW;
     const endTime = currentTimeMs + halfW;
 
-    ctx.fillStyle = 'rgba(108, 92, 231, 0.4)';
-    ctx.strokeStyle = 'rgba(108, 92, 231, 0.7)';
-    ctx.lineWidth = 3;
+    // Phase 6: Draw reference pitches as scrolling rectangular bars (fillRect)
+    // Each voiced segment is rendered as a filled bar at the corresponding pitch level
+    const barHeight = 6; // pixels tall per pitch bar
+    const refs = state.referencePitches;
+    const len = refs.length;
 
-    let prevX = null, prevY = null;
-    let drawing = false;
+    // Pre-compute time range for binary search optimization
+    let startIdx = 0;
+    for (let j = 0; j < len; j++) {
+      if (refs[j].time_ms >= startTime) { startIdx = j; break; }
+    }
 
-    for (const p of state.referencePitches) {
-      if (p.time_ms < startTime || p.time_ms > endTime) continue;
+    let prevVoiced = false;
+    let segStartX = 0;
+    let segY = 0;
+
+    for (let j = startIdx; j < len; j++) {
+      const p = refs[j];
+      if (p.time_ms > endTime) break;
+
       if (!p.is_voiced || p.pitch_hz <= 0) {
-        drawing = false;
+        // End current segment
+        if (prevVoiced) {
+          const segEndX = this.timeToX(refs[j - 1].time_ms, currentTimeMs, windowMs);
+          const w = Math.max(segEndX - segStartX, 2);
+          // Draw filled bar with glow
+          ctx.fillStyle = 'rgba(108, 92, 231, 0.35)';
+          ctx.fillRect(segStartX, segY - barHeight / 2, w, barHeight);
+          // Brighter border  
+          ctx.strokeStyle = 'rgba(108, 92, 231, 0.7)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(segStartX, segY - barHeight / 2, w, barHeight);
+        }
+        prevVoiced = false;
         continue;
       }
 
       const x = this.timeToX(p.time_ms, currentTimeMs, windowMs);
       const y = this.hzToY(p.pitch_hz);
 
-      // Draw as connected segments
-      if (drawing && prevX !== null) {
-        ctx.beginPath();
-        ctx.moveTo(prevX, prevY);
-        ctx.lineTo(x, y);
-        ctx.stroke();
+      if (!prevVoiced) {
+        // Start new segment
+        segStartX = x;
+        segY = y;
+        prevVoiced = true;
+      } else {
+        // Continue segment — if pitch changed significantly, flush and start new
+        const yDiff = Math.abs(y - segY);
+        if (yDiff > barHeight * 2) {
+          // Flush current bar
+          const segEndX = this.timeToX(refs[j - 1].time_ms, currentTimeMs, windowMs);
+          const w = Math.max(segEndX - segStartX, 2);
+          ctx.fillStyle = 'rgba(108, 92, 231, 0.35)';
+          ctx.fillRect(segStartX, segY - barHeight / 2, w, barHeight);
+          ctx.strokeStyle = 'rgba(108, 92, 231, 0.7)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(segStartX, segY - barHeight / 2, w, barHeight);
+          // Start new segment
+          segStartX = x;
+          segY = y;
+        }
       }
+    }
 
-      // Draw dot
-      ctx.beginPath();
-      ctx.arc(x, y, 2, 0, Math.PI * 2);
-      ctx.fill();
-
-      prevX = x;
-      prevY = y;
-      drawing = true;
+    // Flush last segment
+    if (prevVoiced && len > 0) {
+      const lastIdx = Math.min(len - 1, startIdx + len);
+      const lastRef = refs[lastIdx];
+      if (lastRef) {
+        const segEndX = this.timeToX(lastRef.time_ms, currentTimeMs, windowMs);
+        const w = Math.max(segEndX - segStartX, 2);
+        ctx.fillStyle = 'rgba(108, 92, 231, 0.35)';
+        ctx.fillRect(segStartX, segY - barHeight / 2, w, barHeight);
+        ctx.strokeStyle = 'rgba(108, 92, 231, 0.7)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(segStartX, segY - barHeight / 2, w, barHeight);
+      }
     }
   }
 
@@ -191,25 +235,34 @@ class PitchRenderer {
     const halfW = windowMs / 2;
     const startTime = currentTimeMs - halfW;
 
+    // Phase 6: Efficient batched lineTo drawing with judgement-based coloring
+    const colorMap = {
+      'Perfect': '#00e676',
+      'Great': '#64dd17',
+      'Good': '#ffab00',
+      'Miss': '#ff1744',
+    };
+
     ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
 
     let prevX = null, prevY = null;
+    let currentColor = null;
 
     for (const p of state.userPitchHistory) {
       if (p.time_ms < startTime) continue;
       if (p.pitch_hz <= 0) {
         prevX = null;
+        currentColor = null;
         continue;
       }
 
       const x = this.timeToX(p.time_ms, currentTimeMs, windowMs);
       const y = this.hzToY(p.pitch_hz);
+      const color = colorMap[p.judgement] || '#ff1744';
 
-      // Color based on accuracy
-      const color = p.judgement === 'Perfect' ? '#00e676' :
-                    p.judgement === 'Great' ? '#64dd17' :
-                    p.judgement === 'Good' ? '#ffab00' : '#ff1744';
-
+      // Draw connecting line
       if (prevX !== null) {
         ctx.strokeStyle = color;
         ctx.beginPath();
@@ -218,17 +271,29 @@ class PitchRenderer {
         ctx.stroke();
       }
 
-      // Glow dot
+      // Draw glow dot at current position
       ctx.fillStyle = color;
       ctx.shadowColor = color;
-      ctx.shadowBlur = 8;
+      ctx.shadowBlur = 10;
       ctx.beginPath();
-      ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.arc(x, y, 3.5, 0, Math.PI * 2);
       ctx.fill();
       ctx.shadowBlur = 0;
 
       prevX = x;
       prevY = y;
+      currentColor = color;
+    }
+
+    // Draw a larger pulsing dot at the latest position (cursor indicator)
+    if (prevX !== null && currentColor) {
+      ctx.fillStyle = currentColor;
+      ctx.shadowColor = currentColor;
+      ctx.shadowBlur = 18;
+      ctx.beginPath();
+      ctx.arc(prevX, prevY, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
     }
   }
 }

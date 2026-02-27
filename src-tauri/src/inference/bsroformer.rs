@@ -1,5 +1,9 @@
 /// BS-RoFormer inference for vocal separation
 /// Separates audio into vocal and accompaniment tracks
+///
+/// Input tensor shape: [batch_size=1, channels=1, sequence_length]  (f32)
+/// Output tensor shape: [batch_size=1, sources=2, sequence_length]  (f32)
+///   - source 0 = vocal, source 1 = accompaniment
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use ort::session::{builder::GraphOptimizationLevel, Session};
@@ -28,6 +32,14 @@ fn get_session() -> Result<()> {
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .commit_from_file(&model_path)?;
 
+        // Log model input/output shapes for debugging
+        for input in s.inputs().iter() {
+            log::info!("  Model input: '{}'", input.name());
+        }
+        for output in s.outputs().iter() {
+            log::info!("  Model output: '{}'", output.name());
+        }
+
         *session = Some(s);
         log::info!("BS-RoFormer model loaded successfully");
     }
@@ -42,7 +54,14 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
     let mut session_guard = BSROFORMER_SESSION.lock().unwrap();
 
     if let Some(ref mut sess) = *session_guard {
-        // Process in chunks of ~10 seconds with overlap
+        // Determine input name from model metadata
+        let input_name = sess
+            .inputs()
+            .first()
+            .map(|i| i.name().to_string())
+            .unwrap_or_else(|| "mix".to_string());
+
+        // Process in chunks of ~10 seconds with 1s overlap for crossfade
         let chunk_size = sample_rate as usize * 10;
         let overlap = sample_rate as usize; // 1s overlap
         let total_len = pcm.len();
@@ -51,15 +70,16 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
         let mut accompaniment = vec![0.0f32; total_len];
 
         let mut pos = 0usize;
+        let mut chunk_idx = 0usize;
         while pos < total_len {
             let end = (pos + chunk_size).min(total_len);
             let chunk = &pcm[pos..end];
             let chunk_len = chunk.len();
 
-            // Prepare input: [batch=1, channels=1, samples]
-            let input_tensor = Tensor::from_array(([1i64, 1, chunk_len as i64], chunk.to_vec()))?;
+            // Build tensor: [batch=1, channels=1, samples]
+            let input_tensor = Tensor::from_array(([1usize, 1, chunk_len], chunk.to_vec()))?;
 
-            let outputs = sess.run(ort::inputs!["mix" => input_tensor])?;
+            let outputs = sess.run(ort::inputs![&input_name => input_tensor])?;
 
             // Output: [batch=1, sources=2, samples]
             let output_view = outputs[0].try_extract_array::<f32>()?;
@@ -71,16 +91,22 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
                     break;
                 }
 
-                // Simple crossfade for overlapping regions
+                // Linear crossfade for overlapping regions (smooth transition)
                 let fade = if pos > 0 && i < overlap {
                     i as f32 / overlap as f32
                 } else {
                     1.0
                 };
 
-                // Access flattened: source 0 = vocal, source 1 = accompaniment
-                let vocal_val = output_view.get([0, 0, i]).copied().unwrap_or(0.0);
-                let acc_val = output_view.get([0, 1, i]).copied().unwrap_or(0.0);
+                // Access via ndarray indexing: [batch=0, source, sample]
+                let vocal_val = output_view
+                    .get([0, 0, i])
+                    .copied()
+                    .unwrap_or(0.0);
+                let acc_val = output_view
+                    .get([0, 1, i])
+                    .copied()
+                    .unwrap_or(0.0);
 
                 vocal[global_idx] =
                     vocal[global_idx] * (1.0 - fade) + vocal_val * fade;
@@ -88,13 +114,21 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
                     accompaniment[global_idx] * (1.0 - fade) + acc_val * fade;
             }
 
+            chunk_idx += 1;
+            if chunk_idx % 5 == 0 {
+                log::info!(
+                    "BS-RoFormer progress: {:.1}%",
+                    (pos as f64 / total_len as f64) * 100.0
+                );
+            }
+
             pos += chunk_size - overlap;
         }
 
+        log::info!("BS-RoFormer separation complete: {} samples processed", total_len);
         Ok((vocal, accompaniment))
     } else {
-        // Fallback: simple spectral subtraction approximation
-        // Return original as both vocal and accompaniment (no separation)
+        // Fallback: return original as both vocal and accompaniment (no separation)
         log::warn!("Using fallback vocal separation (no model loaded)");
         Ok((pcm.to_vec(), pcm.to_vec()))
     }

@@ -111,7 +111,6 @@ pub fn score_frame(
 }
 
 /// Calculate the note name from Hz
-#[allow(dead_code)]
 pub fn hz_to_note_name(freq_hz: f64) -> String {
     if freq_hz <= 0.0 {
         return "---".to_string();
