@@ -1,0 +1,11 @@
+{
+  "name": "rust-karaoke",
+  "version": "0.1.0",
+  "description": "AI-powered karaoke scoring system",
+  "private": true,
+  "scripts": {
+    "dev": "cargo tauri dev",
+    "build": "cargo tauri build",
+    "tauri": "cargo tauri"
+  }
+}

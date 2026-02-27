@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rust Karaoke</title>
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+  <!-- Custom title bar (borderless window) -->
+  <header id="titlebar" data-tauri-drag-region>
+    <div class="titlebar-left" data-tauri-drag-region>
+      <span class="app-icon">🎤</span>
+      <span class="app-title" data-tauri-drag-region>Rust Karaoke</span>
+    </div>
+    <div class="titlebar-controls">
+      <button id="btn-pip" class="titlebar-btn" title="PiPモード">⊞</button>
+      <button id="btn-minimize" class="titlebar-btn" title="最小化">─</button>
+      <button id="btn-maximize" class="titlebar-btn" title="最大化">□</button>
+      <button id="btn-close" class="titlebar-btn btn-close" title="閉じる">✕</button>
+    </div>
+  </header>
+
+  <main id="app">
+    <!-- URL Input Section -->
+    <section id="input-section">
+      <div class="url-input-group">
+        <input type="text" id="youtube-url" placeholder="YouTube URLを入力..." autocomplete="off" />
+        <button id="btn-analyze" class="btn-primary">解析</button>
+      </div>
+      <div id="progress-bar-container" class="hidden">
+        <div id="progress-bar">
+          <div id="progress-fill"></div>
+        </div>
+        <span id="progress-text">待機中...</span>
+      </div>
+    </section>
+
+    <!-- Main Karaoke View -->
+    <section id="karaoke-section" class="hidden">
+      <!-- Pitch visualization canvas -->
+      <div id="canvas-container">
+        <canvas id="pitch-canvas"></canvas>
+        <div id="pitch-info">
+          <div id="current-note">---</div>
+          <div id="pitch-hz">0 Hz</div>
+        </div>
+      </div>
+
+      <!-- Score display -->
+      <div id="score-panel">
+        <div id="score-display">
+          <div class="score-value" id="score-value">0.0</div>
+          <div class="score-label">スコア</div>
+        </div>
+        <div id="judgement-display">
+          <span id="judgement-text" class="judgement-miss">---</span>
+        </div>
+        <div id="score-breakdown">
+          <div class="score-item perfect"><span class="count" id="perfect-count">0</span><span class="label">Perfect</span></div>
+          <div class="score-item great"><span class="count" id="great-count">0</span><span class="label">Great</span></div>
+          <div class="score-item good"><span class="count" id="good-count">0</span><span class="label">Good</span></div>
+          <div class="score-item miss"><span class="count" id="miss-count">0</span><span class="label">Miss</span></div>
+        </div>
+      </div>
+
+      <!-- Controls -->
+      <div id="controls">
+        <button id="btn-start" class="btn-primary btn-large">▶ スタート</button>
+        <button id="btn-stop" class="btn-danger btn-large hidden">■ ストップ</button>
+        <button id="btn-back" class="btn-secondary">← 戻る</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>
