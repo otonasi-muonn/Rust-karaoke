@@ -15,6 +15,7 @@
     </div>
     <div class="titlebar-controls">
       <button id="btn-pip" class="titlebar-btn" title="PiPモード">⊞</button>
+      <button id="btn-borderless" class="titlebar-btn" title="ボーダーレス切替">⬚</button>
       <button id="btn-minimize" class="titlebar-btn" title="最小化">─</button>
       <button id="btn-maximize" class="titlebar-btn" title="最大化">□</button>
       <button id="btn-close" class="titlebar-btn btn-close" title="閉じる">✕</button>
@@ -37,6 +38,30 @@
         <span id="progress-text">待機中...</span>
       </div>
     </section>
+
+    <!-- ローディングオーバーレイ -->
+    <div id="loading-overlay" class="hidden">
+      <div class="loading-content">
+        <div class="loading-spinner">
+          <div class="spinner-ring"></div>
+          <div class="spinner-ring spinner-ring-2"></div>
+          <div class="spinner-icon">🎵</div>
+        </div>
+        <h3 id="loading-title">楽曲を解析中...</h3>
+        <p id="loading-message">AIが音源分離・ピッチ解析を行っています</p>
+        <div class="loading-progress">
+          <div class="loading-progress-bar">
+            <div id="loading-progress-fill"></div>
+          </div>
+          <div class="loading-steps">
+            <div class="loading-step" id="step-download"><span class="step-icon">⬇</span> ダウンロード</div>
+            <div class="loading-step" id="step-decode"><span class="step-icon">🔊</span> デコード</div>
+            <div class="loading-step" id="step-separation"><span class="step-icon">🎤</span> ボーカル分離</div>
+            <div class="loading-step" id="step-pitch"><span class="step-icon">📊</span> ピッチ解析</div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- Main Karaoke View -->
     <section id="karaoke-section" class="hidden">

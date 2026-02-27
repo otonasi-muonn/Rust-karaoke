@@ -18,6 +18,7 @@ const dom = {
   btnStop: $('#btn-stop'),
   btnBack: $('#btn-back'),
   btnPip: $('#btn-pip'),
+  btnBorderless: $('#btn-borderless'),
   btnMinimize: $('#btn-minimize'),
   btnMaximize: $('#btn-maximize'),
   btnClose: $('#btn-close'),
@@ -35,12 +36,17 @@ const dom = {
   greatCount: $('#great-count'),
   goodCount: $('#good-count'),
   missCount: $('#miss-count'),
+  loadingOverlay: $('#loading-overlay'),
+  loadingTitle: $('#loading-title'),
+  loadingMessage: $('#loading-message'),
+  loadingProgressFill: $('#loading-progress-fill'),
 };
 
 // ---- State ----
 let state = {
   isPlaying: false,
   isPip: false,
+  isBorderless: true,  // starts borderless (decorations: false)
   referencePitches: [],
   durationMs: 0,
   animationFrame: null,
@@ -49,6 +55,7 @@ let state = {
   playbackStartTime: 0,  // performance.now() when playback started
   unlistenPitch: null,    // Unlisten handle for pitch-update
   unlistenScore: null,    // Unlisten handle for score-update
+  pipSizeBeforeRestore: null, // Original size before PiP
 };
 
 // ---- Canvas Renderer ----
@@ -335,11 +342,41 @@ function updateJudgement(judgement) {
 // ---- Progress Polling ----
 let progressInterval;
 
+const stageOrder = ['download', 'decode', 'separation', 'pitch', 'done'];
+const stageMessages = {
+  download: 'YouTubeから楽曲をダウンロードしています...',
+  decode: '音声データをデコードしています...',
+  separation: 'AIがボーカルを分離しています...',
+  pitch: 'リファレンスピッチを解析しています...',
+  done: '解析が完了しました！',
+};
+
+function updateLoadingSteps(currentStage) {
+  const currentIdx = stageOrder.indexOf(currentStage);
+  stageOrder.forEach((stage, idx) => {
+    const el = document.getElementById('step-' + stage);
+    if (!el) return;
+    el.classList.remove('active', 'done');
+    if (idx < currentIdx) {
+      el.classList.add('done');
+    } else if (idx === currentIdx) {
+      el.classList.add('active');
+    }
+  });
+}
+
 async function pollProgress() {
   try {
     const progress = await invoke('get_analysis_progress');
+    // Update old progress bar (hidden)
     dom.progressFill.style.width = (progress.progress * 100) + '%';
     dom.progressText.textContent = progress.message;
+
+    // Update loading overlay
+    dom.loadingProgressFill.style.width = (progress.progress * 100) + '%';
+    dom.loadingMessage.textContent = stageMessages[progress.stage] || progress.message;
+    updateLoadingSteps(progress.stage);
+
     if (progress.stage === 'done') {
       clearInterval(progressInterval);
     }
@@ -429,6 +466,15 @@ dom.btnAnalyze.addEventListener('click', async () => {
   if (!url) return;
 
   dom.btnAnalyze.disabled = true;
+
+  // Show loading overlay
+  dom.loadingOverlay.classList.remove('hidden');
+  dom.loadingProgressFill.style.width = '0%';
+  dom.loadingTitle.textContent = '楽曲を解析中...';
+  dom.loadingMessage.textContent = 'AIが音源分離・ピッチ解析を行っています';
+  updateLoadingSteps('');
+
+  // Also update old progress bar (backup)
   dom.progressContainer.classList.remove('hidden');
   dom.progressFill.style.width = '0%';
   dom.progressText.textContent = '解析を開始しています...';
@@ -443,14 +489,26 @@ dom.btnAnalyze.addEventListener('click', async () => {
     clearInterval(progressInterval);
     dom.progressFill.style.width = '100%';
     dom.progressText.textContent = '解析完了！カラオケの準備ができました';
+    dom.loadingProgressFill.style.width = '100%';
+    dom.loadingTitle.textContent = '解析完了！';
+    dom.loadingMessage.textContent = 'カラオケの準備ができました 🎉';
+    updateLoadingSteps('done');
 
     setTimeout(() => {
+      dom.loadingOverlay.classList.add('hidden');
       showSection('karaoke');
-    }, 500);
+    }, 800);
   } catch (e) {
     clearInterval(progressInterval);
     dom.progressText.textContent = '解析エラー: ' + e;
     dom.progressFill.style.width = '0%';
+    dom.loadingTitle.textContent = 'エラーが発生しました';
+    dom.loadingMessage.textContent = e;
+    dom.loadingProgressFill.style.width = '0%';
+    // Hide loading after 3 seconds on error
+    setTimeout(() => {
+      dom.loadingOverlay.classList.add('hidden');
+    }, 3000);
     console.error('Analysis error:', e);
   } finally {
     dom.btnAnalyze.disabled = false;
@@ -508,12 +566,50 @@ dom.btnBack.addEventListener('click', () => {
 
 // PiP mode
 dom.btnPip.addEventListener('click', async () => {
+  const win = getCurrentWindow();
   state.isPip = !state.isPip;
-  try {
-    await invoke('set_pip_mode', { enabled: state.isPip });
-    dom.btnPip.textContent = state.isPip ? '⊟' : '⊞';
-  } catch (e) {
-    console.error('PiP error:', e);
+
+  if (state.isPip) {
+    // Enter PiP: small always-on-top window
+    document.body.classList.add('pip-mode');
+    await win.setAlwaysOnTop(true);
+    await win.setSize(new window.__TAURI__.window.LogicalSize(400, 300));
+    dom.btnPip.textContent = '⊟';
+    dom.btnPip.classList.add('active');
+  } else {
+    // Exit PiP: restore normal size
+    document.body.classList.remove('pip-mode');
+    await win.setAlwaysOnTop(false);
+    await win.setSize(new window.__TAURI__.window.LogicalSize(1200, 800));
+    dom.btnPip.textContent = '⊞';
+    dom.btnPip.classList.remove('active');
+  }
+
+  // Resize canvas after size change
+  if (renderer) {
+    setTimeout(() => renderer.resize(), 100);
+  }
+});
+
+// Borderless window toggle
+dom.btnBorderless.addEventListener('click', async () => {
+  const win = getCurrentWindow();
+  state.isBorderless = !state.isBorderless;
+
+  await win.setDecorations(!state.isBorderless);
+
+  if (state.isBorderless) {
+    // Borderless: show custom titlebar
+    document.getElementById('titlebar').style.display = '';
+    document.getElementById('app').style.height = 'calc(100% - 36px)';
+    dom.btnBorderless.classList.add('active');
+    dom.btnBorderless.title = 'ボーダーレス (ON)';
+  } else {
+    // Decorated: hide custom titlebar (OS handles it)
+    document.getElementById('titlebar').style.display = 'none';
+    document.getElementById('app').style.height = '100%';
+    dom.btnBorderless.classList.remove('active');
+    dom.btnBorderless.title = 'ボーダーレス (OFF)';
   }
 });
 
@@ -543,4 +639,8 @@ document.addEventListener('DOMContentLoaded', () => {
   renderer = new PitchRenderer(dom.canvas);
   // Draw initial empty state
   renderer.draw(0);
+
+  // Initial borderless state (starts as decorations: false)
+  dom.btnBorderless.classList.add('active');
+  dom.btnBorderless.title = 'ボーダーレス (ON)';
 });

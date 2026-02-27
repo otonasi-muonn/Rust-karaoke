@@ -379,6 +379,162 @@ html, body {
   align-items: center;
 }
 
+/* ---- Loading Overlay ---- */
+#loading-overlay {
+  position: fixed;
+  inset: 36px 0 0 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 10, 15, 0.92);
+  backdrop-filter: blur(12px);
+  animation: fadeIn 0.3s ease-out;
+}
+
+.loading-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  max-width: 400px;
+  text-align: center;
+}
+
+.loading-spinner {
+  position: relative;
+  width: 100px;
+  height: 100px;
+}
+
+.spinner-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 3px solid transparent;
+  border-top-color: var(--accent);
+  animation: spin 1.2s linear infinite;
+}
+
+.spinner-ring-2 {
+  inset: 10px;
+  border-top-color: var(--accent-light);
+  animation-duration: 0.8s;
+  animation-direction: reverse;
+}
+
+.spinner-icon {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 32px;
+  animation: pulseScale 2s ease-in-out infinite;
+}
+
+#loading-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+#loading-message {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.loading-progress {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.loading-progress-bar {
+  width: 100%;
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+
+#loading-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-light), var(--perfect));
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.loading-steps {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.loading-step {
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  transition: all 0.3s;
+}
+
+.loading-step.active {
+  color: var(--accent-light);
+  background: rgba(108, 92, 231, 0.15);
+  border-color: var(--accent);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+
+.loading-step.done {
+  color: var(--perfect);
+  background: rgba(0, 230, 118, 0.1);
+  border-color: rgba(0, 230, 118, 0.3);
+}
+
+.loading-step .step-icon {
+  margin-right: 2px;
+}
+
+/* ---- PiP Mode ---- */
+body.pip-mode #app {
+  padding: 8px;
+}
+
+body.pip-mode #score-panel {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+body.pip-mode .score-value {
+  font-size: 24px;
+}
+
+body.pip-mode #controls {
+  gap: 6px;
+}
+
+body.pip-mode .btn-large {
+  padding: 8px 16px;
+  font-size: 13px;
+}
+
+body.pip-mode #canvas-container {
+  min-height: 150px;
+}
+
+/* ---- Borderless Toggle ---- */
+.titlebar-btn.active {
+  background: rgba(108, 92, 231, 0.2);
+  color: var(--accent-light);
+}
+
 /* ---- Utility ---- */
 .hidden {
   display: none !important;
@@ -393,6 +549,15 @@ html, body {
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulseScale {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.15); }
 }
 
 .animate-in {
