@@ -162,16 +162,11 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
         log::info!("BS-RoFormer separation complete: {} samples in {} chunks", total_len, chunk_idx);
         log::info!("BS-RoFormer channel RMS — ch0 (raw vocal): {:.6}, ch1 (raw accomp): {:.6}", vocal_rms, acc_rms);
 
-        // Many BS-RoFormer models output [accompaniment, vocal] rather than [vocal, accompaniment].
-        // Auto-detect: the vocal track should have LESS energy than accompaniment in most music.
-        // If ch0 has more energy than ch1, channels are likely swapped.
-        if vocal_rms > acc_rms * 1.05 {
-            log::info!("BS-RoFormer: ch0 RMS > ch1 RMS — swapping channels (ch0=accompaniment, ch1=vocal)");
-            Ok((accompaniment, vocal))
-        } else {
-            log::info!("BS-RoFormer: ch0 RMS <= ch1 RMS — keeping original order (ch0=vocal, ch1=accompaniment)");
-            Ok((vocal, accompaniment))
-        }
+        // Always trust the model's output order: ch0=vocal, ch1=accompaniment
+        // (Verified via Python ONNX test: ch0 is near-zero for pure instrument input)
+        // Do NOT auto-swap based on RMS — vocal-heavy songs (Ado, YOASOBI) would misfire.
+        log::info!("BS-RoFormer: returning (ch0=vocal, ch1=accompaniment)");
+        Ok((vocal, accompaniment))
     } else {
         // Fallback: apply bandpass filter to isolate vocal frequencies
         // Without BS-RoFormer, we at least remove bass and high-frequency instruments

@@ -353,16 +353,26 @@ pub fn extract_pitch_batch(audio_16k: &[f32]) -> Result<Vec<(f64, bool)>> {
             for i in 0..actual_audio_frames.min(pitch_values.len()) {
                 let global_idx = global_frame_offset + i;
                 if global_idx < all_pitches.len() {
-                    // Use triangular window for overlap-add blending
-                    let weight = if i < actual_audio_frames / 4 {
-                        i as f32 / (actual_audio_frames as f32 / 4.0)
-                    } else if i > actual_audio_frames * 3 / 4 {
-                        (actual_audio_frames - i) as f32 / (actual_audio_frames as f32 / 4.0)
+                    // Pitch (Hz) must NOT be linearly interpolated with 0Hz (unvoiced).
+                    // Blending 440Hz + 0Hz = 220Hz destroys the pitch entirely.
+                    // Instead, use voiced-priority logic.
+                    let p_new = pitch_values[i];
+                    if p_new > 50.0 {
+                        if all_weights[global_idx] > 0.0 && all_pitches[global_idx] > 50.0 {
+                            // Both chunks are voiced: average for smoothness
+                            all_pitches[global_idx] = (all_pitches[global_idx] + p_new) / 2.0;
+                        } else {
+                            // New chunk is voiced, overwrite
+                            all_pitches[global_idx] = p_new;
+                            all_weights[global_idx] = 1.0;
+                        }
                     } else {
-                        1.0
-                    };
-                    all_pitches[global_idx] += pitch_values[i] * weight;
-                    all_weights[global_idx] += weight;
+                        // New chunk is unvoiced: only write if no data yet
+                        if all_weights[global_idx] == 0.0 {
+                            all_pitches[global_idx] = 0.0;
+                            all_weights[global_idx] = 1.0;
+                        }
+                    }
                 }
             }
 
