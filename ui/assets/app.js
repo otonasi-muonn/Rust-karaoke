@@ -67,6 +67,7 @@ let state = {
   isPip: false,
   isBorderless: true,  // starts borderless (decorations: false)
   referencePitches: [],
+  noteSegments: [],
   durationMs: 0,
   animationFrame: null,
   userPitchHistory: [], // { time_ms, pitch_hz, judgement }
@@ -84,6 +85,11 @@ class PitchRenderer {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
+    // Dynamic vertical range (smoothed)
+    this.viewMinHz = 150;
+    this.viewMaxHz = 600;
+    this.targetMinHz = 150;
+    this.targetMaxHz = 600;
     this.resize();
     window.addEventListener('resize', () => this.resize());
   }
@@ -99,16 +105,74 @@ class PitchRenderer {
     this.height = rect.height;
   }
 
-  // Convert Hz to Y position (logarithmic scale)
+  // Convert Hz to Y position (logarithmic scale, dynamic range)
   hzToY(hz) {
     if (hz <= 0) return this.height;
-    const minHz = 80;   // C2
-    const maxHz = 1200;  // D6
-    const minLog = Math.log2(minHz);
-    const maxLog = Math.log2(maxHz);
+    const minLog = Math.log2(this.viewMinHz);
+    const maxLog = Math.log2(this.viewMaxHz);
     const logHz = Math.log2(hz);
     const normalized = (logHz - minLog) / (maxLog - minLog);
     return this.height - (normalized * (this.height - 40)) - 20;
+  }
+
+  // Update dynamic vertical range based on visible notes
+  updateViewRange(currentTimeMs, windowMs) {
+    const halfW = windowMs / 2;
+    const lookAhead = currentTimeMs + halfW * 1.5; // Look slightly further ahead
+    const lookBehind = currentTimeMs - halfW;
+
+    let minHz = Infinity;
+    let maxHz = -Infinity;
+    let hasNotes = false;
+
+    // Scan note segments for visible pitch range
+    const segs = state.noteSegments;
+    if (segs && segs.length > 0) {
+      for (const seg of segs) {
+        if (seg.endMs < lookBehind) continue;
+        if (seg.startMs > lookAhead) break;
+        if (seg.hz > 0) {
+          minHz = Math.min(minHz, seg.hz);
+          maxHz = Math.max(maxHz, seg.hz);
+          hasNotes = true;
+        }
+      }
+    }
+
+    // Also consider user pitch
+    for (const p of state.userPitchHistory) {
+      if (p.time_ms < lookBehind) continue;
+      if (p.pitch_hz > 0) {
+        minHz = Math.min(minHz, p.pitch_hz);
+        maxHz = Math.max(maxHz, p.pitch_hz);
+        hasNotes = true;
+      }
+    }
+
+    if (hasNotes && isFinite(minHz) && isFinite(maxHz)) {
+      // Add padding: 1 octave below and above, minimum 2 octave range
+      const centerLog = (Math.log2(minHz) + Math.log2(maxHz)) / 2;
+      const rangeLog = Math.log2(maxHz) - Math.log2(minHz);
+      const minRange = 2.0; // minimum 2 octaves displayed
+      const paddedRange = Math.max(rangeLog + 1.0, minRange); // +1 octave padding total
+
+      this.targetMinHz = Math.pow(2, centerLog - paddedRange / 2);
+      this.targetMaxHz = Math.pow(2, centerLog + paddedRange / 2);
+
+      // Clamp to reasonable bounds
+      this.targetMinHz = Math.max(this.targetMinHz, 60);
+      this.targetMaxHz = Math.min(this.targetMaxHz, 2000);
+    }
+
+    // Smooth transition (exponential interpolation in log space)
+    const smoothing = 0.04;
+    const curMinLog = Math.log2(this.viewMinHz);
+    const curMaxLog = Math.log2(this.viewMaxHz);
+    const tgtMinLog = Math.log2(this.targetMinHz);
+    const tgtMaxLog = Math.log2(this.targetMaxHz);
+
+    this.viewMinHz = Math.pow(2, curMinLog + (tgtMinLog - curMinLog) * smoothing);
+    this.viewMaxHz = Math.pow(2, curMaxLog + (tgtMaxLog - curMaxLog) * smoothing);
   }
 
   // Convert time to X position
@@ -123,6 +187,9 @@ class PitchRenderer {
     const w = this.width;
     const h = this.height;
     const windowMs = 8000; // 8 second window
+
+    // Update dynamic vertical range
+    this.updateViewRange(currentTimeMs, windowMs);
 
     // Clear
     ctx.fillStyle = '#0d0d15';
@@ -150,27 +217,40 @@ class PitchRenderer {
   }
 
   drawGrid(ctx, w, h) {
-    const notes = [
-      { hz: 130.81, name: 'C3' },
-      { hz: 196.00, name: 'G3' },
-      { hz: 261.63, name: 'C4' },
-      { hz: 392.00, name: 'G4' },
-      { hz: 523.25, name: 'C5' },
-      { hz: 783.99, name: 'G5' },
-    ];
+    // Dynamically generate grid lines based on current view range
+    const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    const minMidi = Math.floor(69 + 12 * Math.log2(this.viewMinHz / 440));
+    const maxMidi = Math.ceil(69 + 12 * Math.log2(this.viewMaxHz / 440));
 
-    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    // Determine grid density — show every note, every 3rd, etc.
+    const midiRange = maxMidi - minMidi;
+    let step = 1;
+    if (midiRange > 36) step = 6;      // Show every 6 semitones
+    else if (midiRange > 24) step = 3;  // Show every minor 3rd
+    else if (midiRange > 18) step = 2;  // Show every whole tone
+
     ctx.lineWidth = 1;
     ctx.font = '10px Segoe UI';
-    ctx.fillStyle = 'rgba(255,255,255,0.15)';
 
-    for (const note of notes) {
-      const y = this.hzToY(note.hz);
+    for (let midi = minMidi; midi <= maxMidi; midi++) {
+      if (midi % step !== 0) continue;
+      const hz = 440 * Math.pow(2, (midi - 69) / 12);
+      const y = this.hzToY(hz);
+      if (y < 5 || y > h - 5) continue;
+
+      const noteIdx = ((midi % 12) + 12) % 12;
+      const octave = Math.floor(midi / 12) - 1;
+      const name = noteNames[noteIdx] + octave;
+      const isC = noteIdx === 0;
+
+      ctx.strokeStyle = isC ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.03)';
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(w, y);
       ctx.stroke();
-      ctx.fillText(note.name, 4, y - 3);
+
+      ctx.fillStyle = isC ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.12)';
+      ctx.fillText(name, 4, y - 3);
     }
   }
 
@@ -179,82 +259,108 @@ class PitchRenderer {
     const startTime = currentTimeMs - halfW;
     const endTime = currentTimeMs + halfW;
 
-    // Phase 6: Draw reference pitches as scrolling rectangular bars (fillRect)
-    // Each voiced segment is rendered as a filled bar at the corresponding pitch level
-    const barHeight = 6; // pixels tall per pitch bar
-    const refs = state.referencePitches;
-    const len = refs.length;
+    const segs = state.noteSegments;
+    if (!segs || segs.length === 0) return;
 
-    // Pre-compute time range for binary search optimization
-    let startIdx = 0;
-    for (let j = 0; j < len; j++) {
-      if (refs[j].time_ms >= startTime) { startIdx = j; break; }
+    const barHeight = 14;
+    const radius = 4;
+
+    // Binary search for first visible segment
+    let lo = 0, hi = segs.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (segs[mid].endMs < startTime) lo = mid + 1;
+      else hi = mid;
     }
 
-    let prevVoiced = false;
-    let segStartX = 0;
-    let segY = 0;
+    for (let i = lo; i < segs.length; i++) {
+      const seg = segs[i];
+      if (seg.startMs > endTime) break;
 
-    for (let j = startIdx; j < len; j++) {
-      const p = refs[j];
-      if (p.time_ms > endTime) break;
+      const x1 = this.timeToX(seg.startMs, currentTimeMs, windowMs);
+      const x2 = this.timeToX(seg.endMs, currentTimeMs, windowMs);
+      const y = this.hzToY(seg.hz);
+      const w = Math.max(x2 - x1, 4);
 
-      if (!p.is_voiced || p.pitch_hz <= 0) {
-        // End current segment
-        if (prevVoiced) {
-          const segEndX = this.timeToX(refs[j - 1].time_ms, currentTimeMs, windowMs);
-          const w = Math.max(segEndX - segStartX, 2);
-          // Draw filled bar with glow
-          ctx.fillStyle = 'rgba(108, 92, 231, 0.35)';
-          ctx.fillRect(segStartX, segY - barHeight / 2, w, barHeight);
-          // Brighter border  
-          ctx.strokeStyle = 'rgba(108, 92, 231, 0.7)';
-          ctx.lineWidth = 1;
-          ctx.strokeRect(segStartX, segY - barHeight / 2, w, barHeight);
-        }
-        prevVoiced = false;
-        continue;
+      // Determine if note is past (already sung), current, or upcoming
+      const isPast = seg.endMs < currentTimeMs;
+      const isCurrent = seg.startMs <= currentTimeMs && seg.endMs >= currentTimeMs;
+
+      // Bar fill — gradient
+      let alpha = isPast ? 0.2 : (isCurrent ? 0.6 : 0.4);
+      let borderAlpha = isPast ? 0.3 : (isCurrent ? 0.9 : 0.65);
+      const baseR = 108, baseG = 92, baseB = 231;  // Purple theme
+
+      // Draw glow for current note
+      if (isCurrent) {
+        ctx.shadowColor = `rgba(${baseR}, ${baseG}, ${baseB}, 0.5)`;
+        ctx.shadowBlur = 12;
       }
 
-      const x = this.timeToX(p.time_ms, currentTimeMs, windowMs);
-      const y = this.hzToY(p.pitch_hz);
+      // Rounded rectangle bar
+      const bx = x1;
+      const by = y - barHeight / 2;
 
-      if (!prevVoiced) {
-        // Start new segment
-        segStartX = x;
-        segY = y;
-        prevVoiced = true;
+      ctx.beginPath();
+      if (w > radius * 2) {
+        ctx.moveTo(bx + radius, by);
+        ctx.lineTo(bx + w - radius, by);
+        ctx.arcTo(bx + w, by, bx + w, by + radius, radius);
+        ctx.lineTo(bx + w, by + barHeight - radius);
+        ctx.arcTo(bx + w, by + barHeight, bx + w - radius, by + barHeight, radius);
+        ctx.lineTo(bx + radius, by + barHeight);
+        ctx.arcTo(bx, by + barHeight, bx, by + barHeight - radius, radius);
+        ctx.lineTo(bx, by + radius);
+        ctx.arcTo(bx, by, bx + radius, by, radius);
       } else {
-        // Continue segment — if pitch changed significantly, flush and start new
-        const yDiff = Math.abs(y - segY);
-        if (yDiff > barHeight * 2) {
-          // Flush current bar
-          const segEndX = this.timeToX(refs[j - 1].time_ms, currentTimeMs, windowMs);
-          const w = Math.max(segEndX - segStartX, 2);
-          ctx.fillStyle = 'rgba(108, 92, 231, 0.35)';
-          ctx.fillRect(segStartX, segY - barHeight / 2, w, barHeight);
-          ctx.strokeStyle = 'rgba(108, 92, 231, 0.7)';
-          ctx.lineWidth = 1;
-          ctx.strokeRect(segStartX, segY - barHeight / 2, w, barHeight);
-          // Start new segment
-          segStartX = x;
-          segY = y;
-        }
+        ctx.rect(bx, by, w, barHeight);
+      }
+      ctx.closePath();
+
+      // Gradient fill
+      const grad = ctx.createLinearGradient(bx, by, bx, by + barHeight);
+      grad.addColorStop(0, `rgba(${baseR + 40}, ${baseG + 40}, ${baseB}, ${alpha})`);
+      grad.addColorStop(0.5, `rgba(${baseR}, ${baseG}, ${baseB}, ${alpha + 0.1})`);
+      grad.addColorStop(1, `rgba(${baseR - 20}, ${baseG - 20}, ${baseB - 30}, ${alpha})`);
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      // Border
+      ctx.strokeStyle = `rgba(${baseR + 20}, ${baseG + 20}, ${baseB}, ${borderAlpha})`;
+      ctx.lineWidth = isCurrent ? 1.5 : 1;
+      ctx.stroke();
+
+      ctx.shadowBlur = 0;
+      ctx.shadowColor = 'transparent';
+
+      // Note name label — only on bars wide enough
+      if (w > 28) {
+        ctx.font = '9px Segoe UI';
+        ctx.fillStyle = `rgba(255, 255, 255, ${isPast ? 0.25 : 0.55})`;
+        ctx.textBaseline = 'middle';
+        ctx.fillText(seg.noteName, bx + 4, y + 1);
       }
     }
 
-    // Flush last segment
-    if (prevVoiced && len > 0) {
-      const lastIdx = Math.min(len - 1, startIdx + len);
-      const lastRef = refs[lastIdx];
-      if (lastRef) {
-        const segEndX = this.timeToX(lastRef.time_ms, currentTimeMs, windowMs);
-        const w = Math.max(segEndX - segStartX, 2);
-        ctx.fillStyle = 'rgba(108, 92, 231, 0.35)';
-        ctx.fillRect(segStartX, segY - barHeight / 2, w, barHeight);
-        ctx.strokeStyle = 'rgba(108, 92, 231, 0.7)';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(segStartX, segY - barHeight / 2, w, barHeight);
+    // Draw connecting lines between consecutive segments
+    ctx.strokeStyle = 'rgba(108, 92, 231, 0.15)';
+    ctx.lineWidth = 1;
+    for (let i = lo; i < segs.length - 1; i++) {
+      const seg = segs[i];
+      const next = segs[i + 1];
+      if (seg.startMs > endTime) break;
+      if (next.startMs > endTime) break;
+
+      const gap = next.startMs - seg.endMs;
+      if (gap > 0 && gap < 300 && seg.midiNote !== next.midiNote) {
+        const x1 = this.timeToX(seg.endMs, currentTimeMs, windowMs);
+        const x2 = this.timeToX(next.startMs, currentTimeMs, windowMs);
+        const y1 = this.hzToY(seg.hz);
+        const y2 = this.hzToY(next.hz);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
       }
     }
   }
@@ -324,6 +430,105 @@ class PitchRenderer {
       ctx.shadowBlur = 0;
     }
   }
+}
+
+// ---- Note Segmentation (frame-level pitches → karaoke-style note bars) ----
+function buildNoteSegments(referencePitches) {
+  const segments = [];
+  if (!referencePitches || referencePitches.length === 0) return segments;
+
+  const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+  function hzToMidi(hz) {
+    return Math.round(69 + 12 * Math.log2(hz / 440));
+  }
+
+  function midiToHz(midi) {
+    return 440 * Math.pow(2, (midi - 69) / 12);
+  }
+
+  function midiToName(midi) {
+    const n = ((midi % 12) + 12) % 12;
+    const oct = Math.floor(midi / 12) - 1;
+    return noteNames[n] + oct;
+  }
+
+  let curMidi = -1;
+  let curStart = 0;
+  let curEnd = 0;
+  let hzSum = 0;
+  let hzCount = 0;
+
+  for (const p of referencePitches) {
+    if (!p.is_voiced || p.pitch_hz <= 0) {
+      // Flush current segment
+      if (curMidi >= 0 && hzCount > 0) {
+        segments.push({
+          startMs: curStart,
+          endMs: curEnd,
+          midiNote: curMidi,
+          hz: midiToHz(curMidi),
+          noteName: midiToName(curMidi),
+        });
+      }
+      curMidi = -1;
+      hzCount = 0;
+      continue;
+    }
+
+    const midi = hzToMidi(p.pitch_hz);
+
+    if (midi === curMidi) {
+      // Extend current segment
+      curEnd = p.time_ms;
+      hzSum += p.pitch_hz;
+      hzCount++;
+    } else {
+      // Flush previous segment
+      if (curMidi >= 0 && hzCount > 0) {
+        segments.push({
+          startMs: curStart,
+          endMs: curEnd,
+          midiNote: curMidi,
+          hz: midiToHz(curMidi),
+          noteName: midiToName(curMidi),
+        });
+      }
+      // Start new segment
+      curMidi = midi;
+      curStart = p.time_ms;
+      curEnd = p.time_ms;
+      hzSum = p.pitch_hz;
+      hzCount = 1;
+    }
+  }
+
+  // Flush last segment
+  if (curMidi >= 0 && hzCount > 0) {
+    segments.push({
+      startMs: curStart,
+      endMs: curEnd,
+      midiNote: curMidi,
+      hz: midiToHz(curMidi),
+      noteName: midiToName(curMidi),
+    });
+  }
+
+  // Merge adjacent segments with same note if gap is small (<80ms)
+  const merged = [];
+  for (const seg of segments) {
+    if (merged.length > 0) {
+      const prev = merged[merged.length - 1];
+      if (prev.midiNote === seg.midiNote && (seg.startMs - prev.endMs) < 80) {
+        prev.endMs = seg.endMs;
+        continue;
+      }
+    }
+    merged.push({ ...seg });
+  }
+
+  // Filter out very short segments (<40ms) — likely noise
+  return merged.filter(s => (s.endMs - s.startMs) >= 40);
 }
 
 // ---- Pitch Renderer Instance ----
@@ -500,7 +705,9 @@ dom.btnAnalyze.addEventListener('click', async () => {
   try {
     const data = await invoke('analyze_youtube_url', { url });
     state.referencePitches = data.reference_pitches;
+    state.noteSegments = buildNoteSegments(data.reference_pitches);
     state.durationMs = data.duration_ms;
+    console.log(`Note segments: ${state.noteSegments.length} bars built from ${data.reference_pitches.length} frames`);
 
     clearInterval(progressInterval);
     dom.progressFill.style.width = '100%';

@@ -339,7 +339,9 @@ fn get_model_path(model_name: &str) -> PathBuf {
     // Check multiple locations including workspace root for release builds
     let candidates = vec![
         exe_dir.join("models").join(model_name),
-        exe_dir.join("..").join("..").join("..").join("models").join(model_name), // target/release -> src-tauri/models
+        exe_dir.join("..").join("..").join("models").join(model_name), // target/release/../../models = src-tauri/models
+        exe_dir.join("..").join("..").join("..").join("models").join(model_name), // workspace/models
+        exe_dir.join("..").join("..").join("..").join("src-tauri").join("models").join(model_name), // workspace/src-tauri/models
         PathBuf::from("models").join(model_name),
         PathBuf::from("src-tauri/models").join(model_name),
         PathBuf::from("src-tauri").join("models").join(model_name),

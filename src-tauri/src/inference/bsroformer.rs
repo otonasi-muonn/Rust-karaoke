@@ -128,9 +128,11 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
         log::info!("BS-RoFormer separation complete: {} samples processed", total_len);
         Ok((vocal, accompaniment))
     } else {
-        // Fallback: return original as both vocal and accompaniment (no separation)
-        log::warn!("Using fallback vocal separation (no model loaded)");
-        Ok((pcm.to_vec(), pcm.to_vec()))
+        // Fallback: apply bandpass filter to isolate vocal frequencies
+        // Without BS-RoFormer, we at least remove bass and high-frequency instruments
+        log::warn!("Using fallback vocal separation (no model loaded) — applying bandpass filter");
+        let vocal = bandpass_filter_vocal(pcm, sample_rate);
+        Ok((vocal, pcm.to_vec()))
     }
 }
 
@@ -140,17 +142,87 @@ fn get_model_path(model_name: &str) -> PathBuf {
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
 
+    // Check multiple locations including workspace root for release builds
     let candidates = vec![
         exe_dir.join("models").join(model_name),
+        exe_dir.join("..").join("..").join("models").join(model_name), // target/release/../../models = src-tauri/models
+        exe_dir.join("..").join("..").join("..").join("models").join(model_name), // workspace/models
+        exe_dir.join("..").join("..").join("..").join("src-tauri").join("models").join(model_name), // workspace/src-tauri/models
         PathBuf::from("models").join(model_name),
         PathBuf::from("src-tauri/models").join(model_name),
+        PathBuf::from("src-tauri").join("models").join(model_name),
     ];
 
     for path in &candidates {
-        if path.exists() {
-            return path.clone();
+        if let Ok(canonical) = path.canonicalize() {
+            log::info!("Found BS-RoFormer model at: {:?}", canonical);
+            return canonical;
         }
     }
 
+    log::warn!("BS-RoFormer model '{}' not found in any candidate paths:", model_name);
+    for path in &candidates {
+        log::warn!("  tried: {:?} (exists={})", path, path.exists());
+    }
+
+    // Return first candidate (may not exist — triggers fallback)
     candidates[0].clone()
+}
+
+/// Fallback vocal isolation using cascaded IIR bandpass filter
+/// Removes sub-bass (<150Hz) and high-frequency instruments (>4kHz)
+/// This is a crude approximation but much better than no separation
+fn bandpass_filter_vocal(pcm: &[f32], sample_rate: u32) -> Vec<f32> {
+    if pcm.is_empty() {
+        return Vec::new();
+    }
+
+    let len = pcm.len();
+
+    // High-pass filter at 150Hz (remove bass guitar, kick drum)
+    let hp_cutoff = 150.0;
+    let rc_hp = 1.0 / (2.0 * std::f64::consts::PI * hp_cutoff);
+    let dt = 1.0 / sample_rate as f64;
+    let alpha_hp = rc_hp / (rc_hp + dt);
+
+    let mut hp1 = vec![0.0f64; len];
+    hp1[0] = pcm[0] as f64;
+    for i in 1..len {
+        hp1[i] = alpha_hp * (hp1[i - 1] + pcm[i] as f64 - pcm[i - 1] as f64);
+    }
+
+    // Second pass for steeper roll-off
+    let mut hp2 = vec![0.0f64; len];
+    hp2[0] = hp1[0];
+    for i in 1..len {
+        hp2[i] = alpha_hp * (hp2[i - 1] + hp1[i] - hp1[i - 1]);
+    }
+
+    // Low-pass filter at 4kHz (remove cymbals, hi-hats, high harmonics)
+    let lp_cutoff = 4000.0;
+    let rc_lp = 1.0 / (2.0 * std::f64::consts::PI * lp_cutoff);
+    let alpha_lp = dt / (rc_lp + dt);
+
+    let mut lp1 = vec![0.0f64; len];
+    lp1[0] = hp2[0];
+    for i in 1..len {
+        lp1[i] = lp1[i - 1] + alpha_lp * (hp2[i] - lp1[i - 1]);
+    }
+
+    // Second pass
+    let mut result = vec![0.0f32; len];
+    result[0] = lp1[0] as f32;
+    let mut prev = lp1[0];
+    for i in 1..len {
+        prev = prev + alpha_lp * (lp1[i] - prev);
+        result[i] = prev as f32;
+    }
+
+    log::info!(
+        "Fallback bandpass filter applied: {}Hz-{}Hz ({} samples)",
+        hp_cutoff,
+        lp_cutoff,
+        len
+    );
+    result
 }
