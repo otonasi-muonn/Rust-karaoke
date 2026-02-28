@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 /// Separate vocals from the mixed audio
 /// Returns (vocal_pcm, accompaniment_pcm) at 44100Hz mono
+/// Falls back gracefully if BS-RoFormer inference fails
 pub async fn separate_vocals(
     pcm: &[f32],
     state: &Arc<AppState>,
@@ -18,9 +19,18 @@ pub async fn separate_vocals(
     let result = tokio::task::spawn_blocking(move || {
         crate::inference::bsroformer::separate(&pcm_owned, 44100)
     })
-    .await??;
+    .await?;
 
-    state.set_progress("separation", 0.75, "ボーカル分離完了");
-
-    Ok(result)
+    match result {
+        Ok(separated) => {
+            state.set_progress("separation", 0.75, "ボーカル分離完了");
+            Ok(separated)
+        }
+        Err(e) => {
+            log::error!("BS-RoFormer separation failed: {}. Using original audio as fallback.", e);
+            state.set_progress("separation", 0.75, "分離エラー — フォールバック使用中...");
+            // Return original PCM as both vocal and accompaniment
+            Ok((pcm.to_vec(), pcm.to_vec()))
+        }
+    }
 }
