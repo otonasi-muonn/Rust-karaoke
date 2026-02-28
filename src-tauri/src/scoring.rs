@@ -7,13 +7,14 @@
 use crate::state::PitchPoint;
 
 /// Scoring thresholds in cents
-const PERFECT_THRESHOLD: f64 = 50.0; // Within 50 cents = Perfect
-const GREAT_THRESHOLD: f64 = 100.0; // Within 100 cents = Great
-const GOOD_THRESHOLD: f64 = 200.0; // Within 200 cents = Good
-// Beyond 200 cents = Miss
+const PERFECT_THRESHOLD: f64 = 80.0; // Within 80 cents
+const GREAT_THRESHOLD: f64 = 150.0; // Within ~1.5 semitones
+const GOOD_THRESHOLD: f64 = 300.0; // Within ~3 semitones
+// Beyond 300 cents = Miss
 
 /// Time tolerance for matching reference pitches (ms)
-const TIME_TOLERANCE_MS: f64 = 50.0;
+/// Wide tolerance to account for audio latency and singing timing variation
+const TIME_TOLERANCE_MS: f64 = 300.0;
 
 /// Convert frequency (Hz) to cents (relative to A4=440Hz)
 /// cents = 1200 * log2(f / 440) + 6900
@@ -57,33 +58,38 @@ pub fn pitch_diff_cents(user_hz: f64, reference_hz: f64) -> f64 {
 }
 
 /// Score a single frame against reference pitches
+/// Uses binary search + local scan for O(log n + k) performance
 /// Returns (judgement, diff_cents, matched_reference_hz)
 pub fn score_frame(
     time_ms: f64,
     user_pitch_hz: f64,
     reference: &[PitchPoint],
 ) -> (String, f64, f64) {
-    if user_pitch_hz <= 0.0 {
+    if user_pitch_hz <= 0.0 || reference.is_empty() {
         return ("Miss".to_string(), f64::MAX, 0.0);
     }
 
-    // Find the closest reference pitch within time tolerance
+    // Binary search: find the first reference point near time_ms
+    let search_start = time_ms - TIME_TOLERANCE_MS;
+    let search_end = time_ms + TIME_TOLERANCE_MS;
+
+    let idx = reference
+        .partition_point(|p| p.time_ms < search_start);
+
     let mut best_diff = f64::MAX;
     let mut best_ref_hz = 0.0;
 
-    for ref_point in reference {
-        // Skip unvoiced reference points
+    // Scan forward from the binary search position
+    for i in idx..reference.len() {
+        let ref_point = &reference[i];
+        if ref_point.time_ms > search_end {
+            break;
+        }
+
         if !ref_point.is_voiced || ref_point.pitch_hz <= 0.0 {
             continue;
         }
 
-        // Check time proximity (±50ms tolerance for timing variation)
-        let time_diff = (time_ms - ref_point.time_ms).abs();
-        if time_diff > TIME_TOLERANCE_MS {
-            continue;
-        }
-
-        // Calculate pitch difference with octave tolerance
         let diff = pitch_diff_cents(user_pitch_hz, ref_point.pitch_hz);
         if diff < best_diff {
             best_diff = diff;
@@ -91,12 +97,11 @@ pub fn score_frame(
         }
     }
 
-    // If no reference found within time window, it might be a rest
     if best_ref_hz <= 0.0 {
-        return ("Miss".to_string(), f64::MAX, 0.0);
+        // No voiced reference in time window — not the user's fault, skip penalty
+        return ("---".to_string(), f64::MAX, 0.0);
     }
 
-    // Determine judgement based on cents difference
     let judgement = if best_diff <= PERFECT_THRESHOLD {
         "Perfect"
     } else if best_diff <= GREAT_THRESHOLD {

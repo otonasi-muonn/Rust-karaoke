@@ -3,11 +3,36 @@
 use crate::state::AppState;
 use anyhow::Result;
 use rodio::{OutputStream, Sink, Source};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 static PLAYBACK_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Accompaniment volume (0.0 - 2.0), stored as u32 bits
+static PLAYBACK_VOLUME: once_cell::sync::Lazy<AtomicU32> =
+    once_cell::sync::Lazy::new(|| AtomicU32::new(f32::to_bits(1.0)));
+
+/// Set playback volume
+pub fn set_volume(vol: f32) {
+    PLAYBACK_VOLUME.store(vol.to_bits(), Ordering::Relaxed);
+}
+
+/// Get current playback volume
+pub fn get_volume() -> f32 {
+    f32::from_bits(PLAYBACK_VOLUME.load(Ordering::Relaxed))
+}
+
+/// Sink holder for volume updates
+static SINK_HOLDER: once_cell::sync::Lazy<std::sync::Mutex<Option<Arc<Sink>>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
+
+/// Update volume on the active sink
+pub fn update_sink_volume() {
+    if let Some(ref sink) = *SINK_HOLDER.lock().unwrap() {
+        sink.set_volume(get_volume());
+    }
+}
 
 /// Custom PCM source for rodio
 struct PcmSource {
@@ -70,7 +95,11 @@ pub fn start_playback(state: &Arc<AppState>) -> Result<()> {
             }
         };
 
-        let sink = Sink::try_new(&stream_handle).unwrap();
+        let sink = Arc::new(Sink::try_new(&stream_handle).unwrap());
+        sink.set_volume(get_volume());
+
+        // Store sink for volume updates
+        *SINK_HOLDER.lock().unwrap() = Some(Arc::clone(&sink));
 
         let source = PcmSource {
             data: accompaniment,
@@ -105,6 +134,7 @@ pub fn start_playback(state: &Arc<AppState>) -> Result<()> {
 /// Stop playback
 pub fn stop_playback(state: &Arc<AppState>) {
     PLAYBACK_RUNNING.store(false, Ordering::Relaxed);
+    *SINK_HOLDER.lock().unwrap() = None;
     state.set_playing(false);
     log::info!("Playback stopped");
 }

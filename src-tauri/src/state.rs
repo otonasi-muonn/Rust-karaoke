@@ -152,6 +152,13 @@ impl AppState {
         }
     }
 
+    /// Emit mic test level event to the frontend
+    pub fn emit_mic_test_level(&self, level: f32) {
+        if let Some(ref handle) = *self.app_handle.lock().unwrap() {
+            let _ = handle.emit("mic-test-level", level);
+        }
+    }
+
     pub fn set_progress(&self, stage: &str, progress: f64, message: &str) {
         let mut p = self.progress.lock().unwrap();
         *p = (stage.to_string(), progress, message.to_string());

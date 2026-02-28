@@ -25,18 +25,19 @@ pub async fn download_audio(url: &str, state: &Arc<AppState>) -> Result<PathBuf>
 async fn try_ytdlp(url: &str, output_path: &PathBuf, state: &Arc<AppState>) -> Result<()> {
     state.set_progress("download", 0.1, "yt-dlpでダウンロード中...");
 
+    // Remove existing file if any (yt-dlp won't overwrite by default)
+    if output_path.exists() {
+        std::fs::remove_file(output_path)?;
+    }
+
     let output = tokio::process::Command::new("yt-dlp")
         .args([
             "-f",
-            "bestaudio",
+            "bestaudio[ext=m4a]/bestaudio",
             "-o",
             output_path.to_str().unwrap(),
             "--no-playlist",
-            "--extract-audio",
-            "--audio-format",
-            "m4a",
-            "--audio-quality",
-            "0",
+            "--no-continue",
             url,
         ])
         .output()
@@ -47,17 +48,52 @@ async fn try_ytdlp(url: &str, output_path: &PathBuf, state: &Arc<AppState>) -> R
         return Err(anyhow::anyhow!("yt-dlp failed: {}", stderr));
     }
 
+    if !output_path.exists() {
+        // yt-dlp may have added an extension — look for any downloaded file
+        let dir = output_path.parent().unwrap();
+        if let Some(found) = find_downloaded_file(dir)? {
+            std::fs::rename(&found, output_path)?;
+        } else {
+            return Err(anyhow::anyhow!("yt-dlp: ファイルが見つかりません"));
+        }
+    }
+
     state.set_progress("download", 0.25, "ダウンロード完了");
     Ok(())
 }
 
+/// Find the most recently created audio file in the cache directory
+fn find_downloaded_file(dir: &std::path::Path) -> Result<Option<PathBuf>> {
+    let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if latest.is_none() || modified > latest.as_ref().unwrap().1 {
+                        latest = Some((path, modified));
+                    }
+                }
+            }
+        }
+    }
+    Ok(latest.map(|(p, _)| p))
+}
+
 /// Download using rusty_ytdl library
 async fn try_rusty_ytdl(url: &str, output_path: &PathBuf, state: &Arc<AppState>) -> Result<()> {
-    use rusty_ytdl::Video;
+    use rusty_ytdl::{Video, VideoOptions, VideoQuality, VideoSearchOptions};
 
     state.set_progress("download", 0.1, "rusty_ytdlでダウンロード中...");
 
-    let video = Video::new(url)?;
+    let video_options = VideoOptions {
+        quality: VideoQuality::HighestAudio,
+        filter: VideoSearchOptions::Audio,
+        ..Default::default()
+    };
+
+    let video = Video::new_with_options(url, video_options)?;
     let video_info = video.get_info().await?;
 
     log::info!(

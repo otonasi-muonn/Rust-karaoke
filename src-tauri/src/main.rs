@@ -25,6 +25,12 @@ fn main() {
             stop_microphone,
             set_pip_mode,
             get_analysis_progress,
+            list_mic_devices,
+            set_mic_device,
+            start_mic_test,
+            stop_mic_test,
+            set_mic_volume,
+            set_accompaniment_volume,
         ])
         .setup(|app| {
             // Store AppHandle in state for event emission from worker threads
@@ -176,5 +182,48 @@ async fn get_analysis_progress(
         progress: progress.1,
         message: progress.2,
     })
+}
+
+#[tauri::command]
+async fn list_mic_devices() -> Result<Vec<String>, String> {
+    rust_karaoke::audio::microphone::list_input_devices()
+        .map_err(|e| format!("デバイス列挙エラー: {}", e))
+}
+
+#[tauri::command]
+async fn set_mic_device(name: Option<String>) -> Result<(), String> {
+    rust_karaoke::audio::microphone::set_selected_device(name);
+    Ok(())
+}
+
+#[tauri::command]
+async fn start_mic_test(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    let state = Arc::clone(&state);
+    tokio::task::spawn_blocking(move || {
+        rust_karaoke::audio::microphone::start_mic_test(&state)
+            .map_err(|e| format!("マイクテストエラー: {}", e))
+    })
+    .await
+    .map_err(|e| format!("タスクエラー: {}", e))?
+}
+
+#[tauri::command]
+async fn stop_mic_test() -> Result<(), String> {
+    rust_karaoke::audio::microphone::stop_mic_test();
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_mic_volume(gain: f32) -> Result<(), String> {
+    rust_karaoke::audio::microphone::set_mic_gain(gain.clamp(0.0, 3.0));
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_accompaniment_volume(volume: f32) -> Result<(), String> {
+    let vol = volume.clamp(0.0, 2.0);
+    rust_karaoke::audio::playback::set_volume(vol);
+    rust_karaoke::audio::playback::update_sink_volume();
+    Ok(())
 }
 

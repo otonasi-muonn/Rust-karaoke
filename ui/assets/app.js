@@ -40,6 +40,25 @@ const dom = {
   loadingTitle: $('#loading-title'),
   loadingMessage: $('#loading-message'),
   loadingProgressFill: $('#loading-progress-fill'),
+  // Settings
+  btnSettings: $('#btn-settings'),
+  settingsPanel: $('#settings-panel'),
+  btnSettingsClose: $('#btn-settings-close'),
+  micSelect: $('#mic-select'),
+  btnMicRefresh: $('#btn-mic-refresh'),
+  micGain: $('#mic-gain'),
+  micGainValue: $('#mic-gain-value'),
+  btnMicTest: $('#btn-mic-test'),
+  micLevelFill: $('#mic-level-fill'),
+  micTestStatus: $('#mic-test-status'),
+  bgmVolume: $('#bgm-volume'),
+  bgmVolumeValue: $('#bgm-volume-value'),
+  // Zoom
+  uiZoom: $('#ui-zoom'),
+  uiZoomValue: $('#ui-zoom-value'),
+  btnZoomIn: $('#btn-zoom-in'),
+  btnZoomOut: $('#btn-zoom-out'),
+  btnZoomReset: $('#btn-zoom-reset'),
 };
 
 // ---- State ----
@@ -55,6 +74,8 @@ let state = {
   playbackStartTime: 0,  // performance.now() when playback started
   unlistenPitch: null,    // Unlisten handle for pitch-update
   unlistenScore: null,    // Unlisten handle for score-update
+  unlistenMicTest: null,  // Unlisten handle for mic-test-level
+  micTestActive: false,   // Whether persistent mic test is running
   pipSizeBeforeRestore: null, // Original size before PiP
 };
 
@@ -332,6 +353,7 @@ const judgementLabels = {
   'Great': '素晴らしい',
   'Good': '良い',
   'Miss': 'ミス',
+  '---': '',
 };
 
 function updateJudgement(judgement) {
@@ -398,7 +420,7 @@ async function setupEventListeners() {
       state.userPitchHistory.push({
         time_ms: p.time_ms,
         pitch_hz: p.user_pitch_hz,
-        judgement: p.judgement,
+        judgement: p.judgement === '---' ? 'Good' : p.judgement,
       });
       // Trim old entries (keep last 30 seconds)
       const cutoffMs = p.time_ms - 30000;
@@ -445,14 +467,8 @@ let startTime = 0;
 function animationLoop(timestamp) {
   if (!state.isPlaying) return;
 
-  // Use backend-synced time: the latest pitch event time_ms is the true playback position
-  let currentTimeMs;
-  if (state.userPitchHistory.length > 0) {
-    currentTimeMs = state.userPitchHistory[state.userPitchHistory.length - 1].time_ms;
-  } else {
-    // Fallback to client-side estimate
-    currentTimeMs = timestamp - startTime;
-  }
+  // Always use wall-clock time for smooth continuous scrolling
+  const currentTimeMs = performance.now() - state.playbackStartTime;
 
   renderer.draw(currentTimeMs);
   state.animationFrame = requestAnimationFrame(animationLoop);
@@ -533,7 +549,7 @@ dom.btnStart.addEventListener('click', async () => {
     dom.btnStart.classList.add('hidden');
     dom.btnStop.classList.remove('hidden');
 
-    startTime = performance.now();
+    state.playbackStartTime = performance.now();
     state.animationFrame = requestAnimationFrame(animationLoop);
   } catch (e) {
     console.error('Start error:', e);
@@ -634,8 +650,212 @@ dom.btnClose.addEventListener('click', async () => {
   await win.close();
 });
 
+// ---- Settings & Persistence ----
+const STORAGE_KEY = 'rust-karaoke-settings';
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return {};
+}
+
+function saveSettings(partial) {
+  const current = loadSettings();
+  const merged = { ...current, ...partial };
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+}
+
+async function applyStoredSettings() {
+  const s = loadSettings();
+
+  // Apply mic device
+  if (s.micDevice) {
+    await invoke('set_mic_device', { name: s.micDevice }).catch(() => {});
+  }
+
+  // Apply mic gain
+  if (s.micGain !== undefined) {
+    dom.micGain.value = s.micGain;
+    dom.micGainValue.textContent = s.micGain + '%';
+    await invoke('set_mic_volume', { gain: s.micGain / 100 }).catch(() => {});
+  }
+
+  // Apply BGM volume
+  if (s.bgmVolume !== undefined) {
+    dom.bgmVolume.value = s.bgmVolume;
+    dom.bgmVolumeValue.textContent = s.bgmVolume + '%';
+    await invoke('set_accompaniment_volume', { volume: s.bgmVolume / 100 }).catch(() => {});
+  }
+
+  // Apply UI zoom
+  if (s.uiZoom !== undefined) {
+    applyZoom(s.uiZoom);
+  }
+}
+
+async function loadMicDevices() {
+  try {
+    const devices = await invoke('list_mic_devices');
+    dom.micSelect.innerHTML = '';
+
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = '(既定のデバイス)';
+    dom.micSelect.appendChild(defaultOpt);
+
+    for (const name of devices) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      dom.micSelect.appendChild(opt);
+    }
+
+    // Restore saved device
+    const s = loadSettings();
+    if (s.micDevice) {
+      dom.micSelect.value = s.micDevice;
+    }
+  } catch (e) {
+    console.error('Failed to list mic devices:', e);
+    dom.micSelect.innerHTML = '<option value="">デバイスの取得に失敗</option>';
+  }
+}
+
+// Settings panel open/close
+dom.btnSettings.addEventListener('click', async () => {
+  dom.settingsPanel.classList.toggle('hidden');
+  if (!dom.settingsPanel.classList.contains('hidden')) {
+    await loadMicDevices();
+  }
+});
+
+dom.btnSettingsClose.addEventListener('click', () => {
+  dom.settingsPanel.classList.add('hidden');
+  if (state.micTestActive) stopMicTest();
+});
+
+// Click outside settings to close
+dom.settingsPanel.addEventListener('click', (e) => {
+  if (e.target === dom.settingsPanel) {
+    dom.settingsPanel.classList.add('hidden');
+    if (state.micTestActive) stopMicTest();
+  }
+});
+
+// Mic device selection
+dom.micSelect.addEventListener('change', async () => {
+  const name = dom.micSelect.value || null;
+  await invoke('set_mic_device', { name }).catch(console.error);
+  saveSettings({ micDevice: dom.micSelect.value });
+});
+
+// Refresh mic devices
+dom.btnMicRefresh.addEventListener('click', () => loadMicDevices());
+
+// Mic gain slider
+dom.micGain.addEventListener('input', async () => {
+  const val = parseInt(dom.micGain.value, 10);
+  dom.micGainValue.textContent = val + '%';
+  await invoke('set_mic_volume', { gain: val / 100 }).catch(console.error);
+  saveSettings({ micGain: val });
+});
+
+// Persistent mic test (toggle on/off)
+async function startMicTest() {
+  try {
+    await invoke('start_mic_test');
+    state.micTestActive = true;
+    dom.btnMicTest.textContent = '⏹ テスト停止';
+    dom.btnMicTest.classList.add('active');
+    dom.micTestStatus.textContent = 'テスト中...';
+    dom.micTestStatus.style.color = '';
+
+    // Listen for level events
+    state.unlistenMicTest = await listen('mic-test-level', (event) => {
+      const level = event.payload;
+      const pct = Math.round(level * 100);
+      dom.micLevelFill.style.width = pct + '%';
+      if (pct > 5) {
+        dom.micTestStatus.textContent = '検出OK (' + pct + '%)';
+        dom.micTestStatus.style.color = 'var(--perfect)';
+      } else {
+        dom.micTestStatus.textContent = '音が小さい (' + pct + '%)';
+        dom.micTestStatus.style.color = 'var(--good)';
+      }
+    });
+  } catch (e) {
+    dom.micTestStatus.textContent = 'エラー';
+    dom.micTestStatus.style.color = 'var(--miss)';
+    console.error('Mic test start error:', e);
+  }
+}
+
+async function stopMicTest() {
+  try {
+    await invoke('stop_mic_test');
+  } catch (e) {
+    console.error('Mic test stop error:', e);
+  }
+  state.micTestActive = false;
+  dom.btnMicTest.textContent = '🎙 テスト';
+  dom.btnMicTest.classList.remove('active');
+  if (state.unlistenMicTest) {
+    state.unlistenMicTest();
+    state.unlistenMicTest = null;
+  }
+}
+
+dom.btnMicTest.addEventListener('click', async () => {
+  if (state.micTestActive) {
+    await stopMicTest();
+  } else {
+    await startMicTest();
+  }
+});
+
+// BGM volume slider
+dom.bgmVolume.addEventListener('input', async () => {
+  const val = parseInt(dom.bgmVolume.value, 10);
+  dom.bgmVolumeValue.textContent = val + '%';
+  await invoke('set_accompaniment_volume', { volume: val / 100 }).catch(console.error);
+  saveSettings({ bgmVolume: val });
+});
+
+// ---- UI Zoom ----
+function applyZoom(pct) {
+  const scale = pct / 100;
+  document.body.style.zoom = scale;
+  dom.uiZoom.value = pct;
+  dom.uiZoomValue.textContent = pct + '%';
+  saveSettings({ uiZoom: pct });
+  // Resize canvas after zoom change
+  if (renderer) {
+    setTimeout(() => renderer.resize(), 50);
+  }
+}
+
+dom.uiZoom.addEventListener('input', () => {
+  applyZoom(parseInt(dom.uiZoom.value, 10));
+});
+
+dom.btnZoomIn.addEventListener('click', () => {
+  const cur = parseInt(dom.uiZoom.value, 10);
+  applyZoom(Math.min(cur + 10, 200));
+});
+
+dom.btnZoomOut.addEventListener('click', () => {
+  const cur = parseInt(dom.uiZoom.value, 10);
+  applyZoom(Math.max(cur - 10, 50));
+});
+
+dom.btnZoomReset.addEventListener('click', () => {
+  applyZoom(100);
+});
+
 // ---- Init ----
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   renderer = new PitchRenderer(dom.canvas);
   // Draw initial empty state
   renderer.draw(0);
@@ -643,4 +863,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initial borderless state (starts as decorations: false)
   dom.btnBorderless.classList.add('active');
   dom.btnBorderless.title = 'ボーダーレス (ON)';
+
+  // Load and apply saved settings
+  await applyStoredSettings();
 });

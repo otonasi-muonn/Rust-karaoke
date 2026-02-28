@@ -143,83 +143,220 @@ pub fn extract_pitch_frames(
     Ok(frames)
 }
 
-/// Fallback pitch detection using autocorrelation
-/// Used when ONNX model is not available
-fn fallback_pitch_detection(audio: &[f32], sample_rate: u32) -> Result<(f64, bool)> {
-    let n = audio.len();
-    if n < 64 {
-        return Ok((0.0, false));
-    }
+/// Batch extraction: process a long audio buffer and return ALL output frames
+/// Much more accurate than frame-by-frame because FCPE gets full temporal context
+/// Input: mono f32 PCM at 16kHz
+/// Returns: Vec of (frequency_hz, is_voiced) for each model hop frame
+pub fn extract_pitch_batch(audio_16k: &[f32]) -> Result<Vec<(f64, bool)>> {
+    let _ = get_session();
+    let mut session_guard = FCPE_SESSION.lock().unwrap();
 
-    // Calculate RMS for voicing detection
-    let rms: f64 = (audio.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / n as f64).sqrt();
-    if rms < 0.01 {
-        return Ok((0.0, false));
-    }
+    if let Some(ref mut sess) = *session_guard {
+        let input_name = sess
+            .inputs()
+            .first()
+            .map(|i| i.name().to_string())
+            .unwrap_or_else(|| "audio".to_string());
 
-    // Autocorrelation-based pitch detection
-    let min_lag = (sample_rate as f64 / 1000.0) as usize; // ~1000 Hz max
-    let max_lag = (sample_rate as f64 / 50.0) as usize; // ~50 Hz min
-    let max_lag = max_lag.min(n / 2);
+        let len = audio_16k.len();
+        let input_tensor = Tensor::from_array(([1usize, len], audio_16k.to_vec()))?;
+        let outputs = sess.run(ort::inputs![&input_name => input_tensor])?;
 
-    if min_lag >= max_lag {
-        return Ok((0.0, false));
-    }
+        // Collect ALL pitch values from model output [1, num_frames]
+        let pitch_view = outputs[0].try_extract_array::<f32>()?;
+        let pitch_values: Vec<f32> = pitch_view.iter().copied().collect();
 
-    let mut best_corr = 0.0f64;
-    let mut best_lag = 0usize;
+        let voicing_values: Vec<f32> = if outputs.len() > 1 {
+            outputs[1]
+                .try_extract_array::<f32>()?
+                .iter()
+                .copied()
+                .collect()
+        } else {
+            // No voicing output; use pitch threshold
+            pitch_values
+                .iter()
+                .map(|&p| if p > 50.0 { 1.0 } else { 0.0 })
+                .collect()
+        };
 
-    // Normalized autocorrelation
-    let energy: f64 = audio.iter().map(|&s| (s as f64) * (s as f64)).sum();
-
-    for lag in min_lag..max_lag {
-        let mut corr = 0.0f64;
-        for i in 0..(n - lag) {
-            corr += audio[i] as f64 * audio[i + lag] as f64;
+        let mut result = Vec::with_capacity(pitch_values.len());
+        for (&pitch, &voicing) in pitch_values.iter().zip(voicing_values.iter()) {
+            let hz = pitch as f64;
+            let voiced = voicing > 0.5 && hz > 50.0;
+            result.push((hz, voiced));
         }
-        corr /= energy;
 
-        if corr > best_corr {
-            best_corr = corr;
-            best_lag = lag;
+        log::debug!(
+            "Batch extraction: {} input samples -> {} output frames",
+            len,
+            result.len()
+        );
+        Ok(result)
+    } else {
+        // Fallback: frame-by-frame autocorrelation
+        let hop = 160;
+        let frame_size = 640;
+        let total = audio_16k.len().saturating_sub(frame_size) / hop;
+        let mut result = Vec::with_capacity(total);
+        for i in 0..total {
+            let start = i * hop;
+            let end = (start + frame_size).min(audio_16k.len());
+            if end - start < frame_size / 2 {
+                break;
+            }
+            match fallback_pitch_detection(&audio_16k[start..end], 16000) {
+                Ok((hz, voiced)) => result.push((hz, voiced)),
+                Err(_) => result.push((0.0, false)),
+            }
         }
+        Ok(result)
     }
-
-    if best_lag == 0 || best_corr < 0.3 {
-        return Ok((0.0, false));
-    }
-
-    // Parabolic interpolation for sub-sample accuracy
-    let pitch_hz = sample_rate as f64 / best_lag as f64;
-
-    // Filter unreasonable pitches
-    if pitch_hz < 50.0 || pitch_hz > 1500.0 {
-        return Ok((0.0, false));
-    }
-
-    Ok((pitch_hz, true))
 }
 
-/// Get the model file path
+/// Fallback pitch detection using the YIN algorithm
+/// High-accuracy pitch detection without ML model
+/// Reference: de Cheveigné & Kawahara (2002) "YIN, a fundamental frequency estimator"
+fn fallback_pitch_detection(audio: &[f32], sample_rate: u32) -> Result<(f64, bool)> {
+    let n = audio.len();
+    if n < 128 {
+        return Ok((0.0, false));
+    }
+
+    // RMS voicing gate
+    let rms: f64 = (audio.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / n as f64).sqrt();
+    if rms < 0.005 {
+        return Ok((0.0, false));
+    }
+
+    let min_freq = 60.0; // Hz, lowest pitch we detect
+    let max_freq = 1100.0; // Hz, highest pitch we detect
+    let min_lag = (sample_rate as f64 / max_freq) as usize;
+    let max_lag = ((sample_rate as f64 / min_freq) as usize).min(n / 2);
+
+    if min_lag >= max_lag || max_lag < 2 {
+        return Ok((0.0, false));
+    }
+
+    // Step 1: Compute the difference function d(tau)
+    let w = max_lag; // analysis window size
+    let mut d = vec![0.0f64; max_lag + 1];
+    d[0] = 0.0;
+
+    // Efficient cumulative computation
+    for tau in 1..=max_lag {
+        let mut sum = 0.0f64;
+        let limit = w.min(n - tau);
+        for j in 0..limit {
+            let diff = audio[j] as f64 - audio[j + tau] as f64;
+            sum += diff * diff;
+        }
+        d[tau] = sum;
+    }
+
+    // Step 2: Cumulative mean normalized difference function d'(tau)
+    let mut d_prime = vec![1.0f64; max_lag + 1];
+    d_prime[0] = 1.0;
+    let mut running_sum = 0.0f64;
+    for tau in 1..=max_lag {
+        running_sum += d[tau];
+        if running_sum > 0.0 {
+            d_prime[tau] = d[tau] * tau as f64 / running_sum;
+        } else {
+            d_prime[tau] = 1.0;
+        }
+    }
+
+    // Step 3: Absolute threshold — find first dip below threshold
+    let yin_threshold = 0.15; // Lower = stricter voicing
+    let mut best_tau = 0usize;
+
+    // Search for first minimum below threshold (skip tau < min_lag)
+    let mut tau = min_lag;
+    while tau < max_lag {
+        if d_prime[tau] < yin_threshold {
+            // Find the local minimum in this valley
+            while tau + 1 < max_lag && d_prime[tau + 1] < d_prime[tau] {
+                tau += 1;
+            }
+            best_tau = tau;
+            break;
+        }
+        tau += 1;
+    }
+
+    // If no dip below threshold, find global minimum as fallback
+    if best_tau == 0 {
+        let mut min_val = f64::MAX;
+        for tau in min_lag..max_lag {
+            if d_prime[tau] < min_val {
+                min_val = d_prime[tau];
+                best_tau = tau;
+            }
+        }
+        // Require reasonably low value
+        if min_val > 0.5 {
+            return Ok((0.0, false));
+        }
+    }
+
+    if best_tau == 0 {
+        return Ok((0.0, false));
+    }
+
+    // Step 4: Parabolic interpolation for sub-sample accuracy
+    let tau_f = if best_tau > min_lag && best_tau + 1 < max_lag {
+        let s0 = d_prime[best_tau - 1];
+        let s1 = d_prime[best_tau];
+        let s2 = d_prime[best_tau + 1];
+        let denom = 2.0 * s1 - s2 - s0;
+        if denom.abs() > 1e-12 {
+            best_tau as f64 + (s0 - s2) / (2.0 * denom)
+        } else {
+            best_tau as f64
+        }
+    } else {
+        best_tau as f64
+    };
+
+    let pitch_hz = sample_rate as f64 / tau_f;
+
+    if pitch_hz < min_freq || pitch_hz > max_freq {
+        return Ok((0.0, false));
+    }
+
+    let confidence = 1.0 - d_prime[best_tau];
+    Ok((pitch_hz, confidence > 0.5))
+}
+
+/// Get the model file path - searches multiple locations for release/dev builds
 fn get_model_path(model_name: &str) -> PathBuf {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // Check multiple locations
+    // Check multiple locations including workspace root for release builds
     let candidates = vec![
         exe_dir.join("models").join(model_name),
+        exe_dir.join("..").join("..").join("..").join("models").join(model_name), // target/release -> src-tauri/models
         PathBuf::from("models").join(model_name),
         PathBuf::from("src-tauri/models").join(model_name),
+        PathBuf::from("src-tauri").join("models").join(model_name),
     ];
 
     for path in &candidates {
-        if path.exists() {
-            return path.clone();
+        if let Ok(canonical) = path.canonicalize() {
+            log::info!("Found model at: {:?}", canonical);
+            return canonical;
         }
     }
 
-    // Return default path (may not exist)
+    log::warn!("Model '{}' not found in any candidate paths:", model_name);
+    for path in &candidates {
+        log::warn!("  tried: {:?} (exists={})", path, path.exists());
+    }
+
+    // Return first candidate (may not exist — triggers fallback)
     candidates[0].clone()
 }
