@@ -9,7 +9,23 @@ use std::sync::Arc;
 use tauri::Manager;
 
 fn main() {
-    env_logger::init();
+    // Initialize file-based logging for release builds (Windows hides stderr)
+    let log_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("rust-karaoke.log")))
+        .unwrap_or_else(|| std::path::PathBuf::from("rust-karaoke.log"));
+
+    let log_file = std::fs::File::create(&log_path).ok();
+    let mut builder = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info")
+    );
+    if let Some(file) = log_file {
+        builder.target(env_logger::Target::Pipe(Box::new(file)));
+    }
+    builder.init();
+
+    log::info!("=== Rust Karaoke starting ===");
+    log::info!("Log file: {:?}", log_path);
 
     let app_state = Arc::new(AppState::new());
 

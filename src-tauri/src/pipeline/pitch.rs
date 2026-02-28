@@ -7,9 +7,11 @@ use anyhow::Result;
 /// Processes in 30-second segments with 2-second overlap for optimal accuracy
 /// This leverages FCPE's temporal context for much better results than frame-by-frame
 pub fn extract_reference_pitches(vocal_pcm: &[f32]) -> Result<Vec<PitchPoint>> {
-    // Apply high-pass filter to remove bass leakage from imperfect vocal separation
-    let filtered = apply_highpass_filter(vocal_pcm, 44100, 150.0);
-    let resampled = resample_to_16k(&filtered, 44100);
+    // Compute RMS to check if vocal track has audible content
+    let rms: f64 = (vocal_pcm.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / vocal_pcm.len().max(1) as f64).sqrt();
+    log::info!("Vocal PCM: {} samples, RMS={:.6}", vocal_pcm.len(), rms);
+
+    let resampled = resample_to_16k(vocal_pcm, 44100);
     let sr = 16000u32;
     let total_s = resampled.len() as f64 / sr as f64;
 
@@ -96,22 +98,40 @@ pub fn extract_reference_pitches(vocal_pcm: &[f32]) -> Result<Vec<PitchPoint>> {
     );
 
     // ---- Post-processing pipeline ----
+    let v_count = |p: &[PitchPoint]| p.iter().filter(|p| p.is_voiced).count();
+
     // 0. Filter by vocal frequency range (remove bass/instrument leakage)
-    //    Typical singing: male ~100Hz(G2)-~550Hz(C5), female ~175Hz(F3)-~1050Hz(C6)
-    //    Use 130Hz (C3) as lower bound to exclude bass guitar fundamentals
-    filter_vocal_range(&mut all_pitches, 130.0, 1000.0);
+    let before = v_count(&all_pitches);
+    filter_vocal_range(&mut all_pitches, 65.0, 1500.0);
+    log::info!("  vocal_range filter: {} -> {} voiced", before, v_count(&all_pitches));
 
-    // 1. Remove isolated outlier pitches (spike removal)
+    // 1. Octave correction — fix harmonic confusion (2x/0.5x jumps)
+    let before = v_count(&all_pitches);
+    correct_octave_jumps(&mut all_pitches);
+    log::info!("  octave_correction: {} -> {} voiced", before, v_count(&all_pitches));
+
+    // 2. Running median rejection — remove frames far from local pitch trend
+    let before = v_count(&all_pitches);
+    running_median_reject(&mut all_pitches, 30, 500.0);
+    log::info!("  median_reject: {} -> {} voiced", before, v_count(&all_pitches));
+
+    // 3. Remove isolated outlier pitches (spike removal)
+    let before = v_count(&all_pitches);
     remove_pitch_outliers(&mut all_pitches);
+    log::info!("  outlier filter: {} -> {} voiced", before, v_count(&all_pitches));
 
-    // 2. Remove very short voiced segments (<80ms) — likely instrument transients
-    remove_short_segments(&mut all_pitches, 80.0);
+    // 4. Remove very short voiced segments (<30ms) — likely instrument transients
+    let before = v_count(&all_pitches);
+    remove_short_segments(&mut all_pitches, 30.0);
+    log::info!("  short_seg filter: {} -> {} voiced", before, v_count(&all_pitches));
 
-    // 3. Median filter (3-frame window) to smooth pitch contour
-    median_filter_pitch(&mut all_pitches, 3);
+    // 5. Median filter (5-frame window) to smooth pitch contour
+    median_filter_pitch(&mut all_pitches, 5);
 
-    // 4. Fill short gaps (interpolate between voiced segments)
-    fill_pitch_gaps(&mut all_pitches, 5);
+    // 6. Fill short gaps (interpolate between voiced segments)
+    let before = v_count(&all_pitches);
+    fill_pitch_gaps(&mut all_pitches, 10);
+    log::info!("  gap_fill: {} -> {} voiced", before, v_count(&all_pitches));
 
     let final_voiced = all_pitches.iter().filter(|p| p.is_voiced).count();
     log::info!(
@@ -123,7 +143,144 @@ pub fn extract_reference_pitches(vocal_pcm: &[f32]) -> Result<Vec<PitchPoint>> {
     Ok(all_pitches)
 }
 
-/// Remove isolated outlier frames whose pitch jumps > 400 cents from both neighbors
+/// Correct octave jumps caused by harmonic confusion
+/// If a frame is ~1200 cents (1 octave) away from its neighbors, snap it to the correct octave
+fn correct_octave_jumps(pitches: &mut [PitchPoint]) {
+    let len = pitches.len();
+    if len < 3 {
+        return;
+    }
+
+    let hz_to_cents = |hz: f64| -> f64 {
+        if hz <= 0.0 { 0.0 } else { 1200.0 * (hz / 440.0).log2() + 6900.0 }
+    };
+
+    let mut corrected = 0usize;
+
+    for i in 1..len - 1 {
+        if !pitches[i].is_voiced {
+            continue;
+        }
+
+        // Find nearest voiced neighbors (within ±10 frames)
+        let left_hz = (1..=10.min(i))
+            .find_map(|d| {
+                if pitches[i - d].is_voiced { Some(pitches[i - d].pitch_hz) } else { None }
+            });
+        let right_hz = ((i + 1)..len.min(i + 11))
+            .find_map(|j| {
+                if pitches[j].is_voiced { Some(pitches[j].pitch_hz) } else { None }
+            });
+
+        // Get reference pitch (average of neighbors if both exist)
+        let ref_hz = match (left_hz, right_hz) {
+            (Some(l), Some(r)) => (l * r).sqrt(), // geometric mean
+            (Some(l), None) => l,
+            (None, Some(r)) => r,
+            _ => continue,
+        };
+
+        let current = pitches[i].pitch_hz;
+        let ref_cents = hz_to_cents(ref_hz);
+        let cur_cents = hz_to_cents(current);
+        let diff = (cur_cents - ref_cents).abs();
+
+        // Check for octave jumps: ~1200, ~2400 cents difference
+        if diff > 1000.0 && diff < 1400.0 {
+            // 1 octave jump — snap to closer octave
+            let down = current / 2.0;
+            let up = current * 2.0;
+            let diff_down = (hz_to_cents(down) - ref_cents).abs();
+            let diff_up = (hz_to_cents(up) - ref_cents).abs();
+            if diff_down < diff_up && diff_down < 300.0 {
+                pitches[i].pitch_hz = down;
+                corrected += 1;
+            } else if diff_up < 300.0 {
+                pitches[i].pitch_hz = up;
+                corrected += 1;
+            }
+        } else if diff > 2200.0 && diff < 2600.0 {
+            // 2 octave jump
+            let down = current / 4.0;
+            let up = current * 4.0;
+            let diff_down = (hz_to_cents(down) - ref_cents).abs();
+            let diff_up = (hz_to_cents(up) - ref_cents).abs();
+            if diff_down < diff_up && diff_down < 300.0 {
+                pitches[i].pitch_hz = down;
+                corrected += 1;
+            } else if diff_up < 300.0 {
+                pitches[i].pitch_hz = up;
+                corrected += 1;
+            }
+        }
+    }
+
+    if corrected > 0 {
+        log::info!("Octave correction: fixed {} frames", corrected);
+    }
+}
+
+/// Reject voiced frames whose pitch deviates too far from the local median
+/// Uses a sliding window to establish the expected pitch contour
+fn running_median_reject(pitches: &mut [PitchPoint], window_half: usize, max_diff_cents: f64) {
+    let len = pitches.len();
+    if len < 5 {
+        return;
+    }
+
+    let hz_to_cents = |hz: f64| -> f64 {
+        if hz <= 0.0 { 0.0 } else { 1200.0 * (hz / 440.0).log2() + 6900.0 }
+    };
+
+    let mut kill = vec![false; len];
+
+    for i in 0..len {
+        if !pitches[i].is_voiced {
+            continue;
+        }
+
+        // Collect voiced pitches in the window
+        let start = i.saturating_sub(window_half);
+        let end = (i + window_half + 1).min(len);
+        let mut window_cents: Vec<f64> = Vec::new();
+        for j in start..end {
+            if pitches[j].is_voiced && !kill[j] {
+                window_cents.push(hz_to_cents(pitches[j].pitch_hz));
+            }
+        }
+
+        if window_cents.len() < 3 {
+            continue; // Not enough context
+        }
+
+        window_cents.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = window_cents[window_cents.len() / 2];
+        let cur = hz_to_cents(pitches[i].pitch_hz);
+        let mut diff = (cur - median).abs();
+        // Allow octave equivalence
+        diff = diff % 1200.0;
+        if diff > 600.0 {
+            diff = 1200.0 - diff;
+        }
+
+        if diff > max_diff_cents {
+            kill[i] = true;
+        }
+    }
+
+    let removed: usize = kill.iter().filter(|&&k| k).count();
+    for i in 0..len {
+        if kill[i] {
+            pitches[i].is_voiced = false;
+            pitches[i].pitch_hz = 0.0;
+        }
+    }
+    if removed > 0 {
+        log::info!("Running median reject: removed {} frames (window={}, threshold={}cents)", removed, window_half * 2 + 1, max_diff_cents);
+    }
+}
+
+/// Remove isolated outlier frames whose pitch jumps > 600 cents from both neighbors
 fn remove_pitch_outliers(pitches: &mut [PitchPoint]) {
     if pitches.len() < 3 {
         return;
@@ -151,7 +308,7 @@ fn remove_pitch_outliers(pitches: &mut [PitchPoint]) {
             if diff > 600.0 {
                 diff = 1200.0 - diff;
             }
-            diff < 400.0
+            diff < 600.0
         };
         let right_ok = pitches[i + 1].is_voiced && {
             let mut diff = (c - cents(pitches[i + 1].pitch_hz)).abs();
@@ -159,7 +316,7 @@ fn remove_pitch_outliers(pitches: &mut [PitchPoint]) {
             if diff > 600.0 {
                 diff = 1200.0 - diff;
             }
-            diff < 400.0
+            diff < 600.0
         };
 
         if !left_ok && !right_ok {

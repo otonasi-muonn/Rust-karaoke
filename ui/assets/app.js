@@ -434,92 +434,104 @@ class PitchRenderer {
 
 // ---- Note Segmentation (frame-level pitches → karaoke-style note bars) ----
 function buildNoteSegments(referencePitches) {
-  const segments = [];
-  if (!referencePitches || referencePitches.length === 0) return segments;
+  if (!referencePitches || referencePitches.length === 0) return [];
 
   const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
   function hzToMidi(hz) {
     return Math.round(69 + 12 * Math.log2(hz / 440));
   }
-
   function midiToHz(midi) {
     return 440 * Math.pow(2, (midi - 69) / 12);
   }
-
   function midiToName(midi) {
     const n = ((midi % 12) + 12) % 12;
     const oct = Math.floor(midi / 12) - 1;
     return noteNames[n] + oct;
   }
 
-  let curMidi = -1;
-  let curStart = 0;
-  let curEnd = 0;
-  let hzSum = 0;
-  let hzCount = 0;
+  // Step 1: Quantize each voiced frame to MIDI, allowing ±1 semitone wobble
+  // Use a 5-frame majority vote window to stabilize notes
+  const VOTE_WINDOW = 5;
+  const voiced = referencePitches.filter(p => p.is_voiced && p.pitch_hz > 0);
+  if (voiced.length === 0) return [];
 
-  for (const p of referencePitches) {
-    if (!p.is_voiced || p.pitch_hz <= 0) {
-      // Flush current segment
-      if (curMidi >= 0 && hzCount > 0) {
-        segments.push({
-          startMs: curStart,
-          endMs: curEnd,
-          midiNote: curMidi,
-          hz: midiToHz(curMidi),
-          noteName: midiToName(curMidi),
-        });
-      }
-      curMidi = -1;
-      hzCount = 0;
-      continue;
+  const midiValues = voiced.map(p => hzToMidi(p.pitch_hz));
+  const stableMidi = midiValues.map((m, idx) => {
+    const start = Math.max(0, idx - Math.floor(VOTE_WINDOW / 2));
+    const end = Math.min(midiValues.length, idx + Math.floor(VOTE_WINDOW / 2) + 1);
+    const counts = {};
+    for (let i = start; i < end; i++) {
+      const v = midiValues[i];
+      counts[v] = (counts[v] || 0) + 1;
     }
+    let bestNote = m, bestCount = 0;
+    for (const [note, count] of Object.entries(counts)) {
+      if (count > bestCount) { bestCount = count; bestNote = parseInt(note); }
+    }
+    return bestNote;
+  });
 
-    const midi = hzToMidi(p.pitch_hz);
+  // Step 2: Build raw segments from stabilized MIDI values
+  const segments = [];
+  let curMidi = stableMidi[0];
+  let curStart = voiced[0].time_ms;
+  let curEnd = voiced[0].time_ms;
 
-    if (midi === curMidi) {
-      // Extend current segment
-      curEnd = p.time_ms;
-      hzSum += p.pitch_hz;
-      hzCount++;
+  for (let i = 1; i < voiced.length; i++) {
+    const midi = stableMidi[i];
+    const timeMs = voiced[i].time_ms;
+    const gap = timeMs - curEnd;
+
+    if (midi === curMidi && gap < 200) {
+      // Same note, extend (allow gaps up to 200ms within a note)
+      curEnd = timeMs;
     } else {
       // Flush previous segment
-      if (curMidi >= 0 && hzCount > 0) {
-        segments.push({
-          startMs: curStart,
-          endMs: curEnd,
-          midiNote: curMidi,
-          hz: midiToHz(curMidi),
-          noteName: midiToName(curMidi),
-        });
-      }
-      // Start new segment
+      segments.push({
+        startMs: curStart, endMs: curEnd, midiNote: curMidi,
+        hz: midiToHz(curMidi), noteName: midiToName(curMidi),
+      });
       curMidi = midi;
-      curStart = p.time_ms;
-      curEnd = p.time_ms;
-      hzSum = p.pitch_hz;
-      hzCount = 1;
+      curStart = timeMs;
+      curEnd = timeMs;
+    }
+  }
+  // Flush last
+  segments.push({
+    startMs: curStart, endMs: curEnd, midiNote: curMidi,
+    hz: midiToHz(curMidi), noteName: midiToName(curMidi),
+  });
+
+  // Step 3: Absorb very short segments (< 60ms) into neighbors if within ±1 semitone
+  for (let i = 1; i < segments.length - 1; i++) {
+    const seg = segments[i];
+    const dur = seg.endMs - seg.startMs;
+    if (dur >= 60) continue;
+
+    const prev = segments[i - 1];
+    const next = segments[i + 1];
+    const diffPrev = Math.abs(seg.midiNote - prev.midiNote);
+    const diffNext = Math.abs(seg.midiNote - next.midiNote);
+
+    // Absorb into whichever neighbor is closer in pitch
+    if (diffPrev <= 1 && (seg.startMs - prev.endMs) < 200) {
+      prev.endMs = seg.endMs;
+      segments.splice(i, 1);
+      i--;
+    } else if (diffNext <= 1 && (next.startMs - seg.endMs) < 200) {
+      next.startMs = seg.startMs;
+      segments.splice(i, 1);
+      i--;
     }
   }
 
-  // Flush last segment
-  if (curMidi >= 0 && hzCount > 0) {
-    segments.push({
-      startMs: curStart,
-      endMs: curEnd,
-      midiNote: curMidi,
-      hz: midiToHz(curMidi),
-      noteName: midiToName(curMidi),
-    });
-  }
-
-  // Merge adjacent segments with same note if gap is small (<80ms)
+  // Step 4: Merge same-note segments with gaps < 300ms
   const merged = [];
   for (const seg of segments) {
     if (merged.length > 0) {
       const prev = merged[merged.length - 1];
-      if (prev.midiNote === seg.midiNote && (seg.startMs - prev.endMs) < 80) {
+      if (prev.midiNote === seg.midiNote && (seg.startMs - prev.endMs) < 300) {
         prev.endMs = seg.endMs;
         continue;
       }
@@ -527,8 +539,17 @@ function buildNoteSegments(referencePitches) {
     merged.push({ ...seg });
   }
 
-  // Filter out very short segments (<40ms) — likely noise
-  return merged.filter(s => (s.endMs - s.startMs) >= 40);
+  // Step 5: Extend each segment by a small amount to fill visual gaps
+  const EXTEND_MS = 15; // add 15ms padding to each end
+  for (const seg of merged) {
+    seg.startMs = Math.max(0, seg.startMs - EXTEND_MS);
+    seg.endMs += EXTEND_MS;
+  }
+
+  // Step 6: Filter out very short segments (<30ms after all merging)
+  const result = merged.filter(s => (s.endMs - s.startMs) >= 30);
+  console.log(`buildNoteSegments: ${referencePitches.length} frames -> ${voiced.length} voiced -> ${result.length} bars`);
+  return result;
 }
 
 // ---- Pitch Renderer Instance ----

@@ -53,6 +53,10 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
     let _ = get_session();
     let mut session_guard = BSROFORMER_SESSION.lock().unwrap();
 
+    // Compute input RMS for diagnostic purposes
+    let input_rms: f64 = (pcm.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / pcm.len().max(1) as f64).sqrt();
+    log::info!("BS-RoFormer input: {} samples, SR={}, RMS={:.6}", pcm.len(), sample_rate, input_rms);
+
     if let Some(ref mut sess) = *session_guard {
         // Determine input name from model metadata
         let input_name = sess
@@ -143,8 +147,22 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
             pos += chunk_size - overlap;
         }
 
+        // Log RMS for both channels to verify which is vocal vs accompaniment
+        let vocal_rms: f64 = (vocal.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / total_len.max(1) as f64).sqrt();
+        let acc_rms: f64 = (accompaniment.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / total_len.max(1) as f64).sqrt();
         log::info!("BS-RoFormer separation complete: {} samples in {} chunks", total_len, chunk_idx);
-        Ok((vocal, accompaniment))
+        log::info!("BS-RoFormer channel RMS — ch0 (raw vocal): {:.6}, ch1 (raw accomp): {:.6}", vocal_rms, acc_rms);
+
+        // Many BS-RoFormer models output [accompaniment, vocal] rather than [vocal, accompaniment].
+        // Auto-detect: the vocal track should have LESS energy than accompaniment in most music.
+        // If ch0 has more energy than ch1, channels are likely swapped.
+        if vocal_rms > acc_rms * 1.05 {
+            log::info!("BS-RoFormer: ch0 RMS > ch1 RMS — swapping channels (ch0=accompaniment, ch1=vocal)");
+            Ok((accompaniment, vocal))
+        } else {
+            log::info!("BS-RoFormer: ch0 RMS <= ch1 RMS — keeping original order (ch0=vocal, ch1=accompaniment)");
+            Ok((vocal, accompaniment))
+        }
     } else {
         // Fallback: apply bandpass filter to isolate vocal frequencies
         // Without BS-RoFormer, we at least remove bass and high-frequency instruments
