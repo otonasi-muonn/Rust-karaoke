@@ -11,7 +11,19 @@ pub fn extract_reference_pitches(vocal_pcm: &[f32]) -> Result<Vec<PitchPoint>> {
     let rms: f64 = (vocal_pcm.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / vocal_pcm.len().max(1) as f64).sqrt();
     log::info!("Vocal PCM: {} samples, RMS={:.6}", vocal_pcm.len(), rms);
 
-    let resampled = resample_to_16k(vocal_pcm, 44100);
+    // Pre-process: Apply bandpass filter (100-3000Hz) to remove instrument leakage
+    // Bass instruments and high-frequency harmonics confuse pitch detection
+    let filtered = apply_bandpass_filter(vocal_pcm, 44100, 100.0, 3000.0);
+    let filtered_rms: f64 = (filtered.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / filtered.len().max(1) as f64).sqrt();
+    log::info!("After bandpass (100-3000Hz): RMS={:.6}", filtered_rms);
+
+    // Pre-process: RMS-based gate — zero out segments below threshold
+    // This removes quiet instrument leakage between vocal phrases
+    let gated = rms_gate(&filtered, 44100, 0.02, 50);
+    let gated_rms: f64 = (gated.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / gated.len().max(1) as f64).sqrt();
+    log::info!("After RMS gate (threshold=0.02): RMS={:.6}", gated_rms);
+
+    let resampled = resample_to_16k(&gated, 44100);
     let sr = 16000u32;
     let total_s = resampled.len() as f64 / sr as f64;
 
@@ -533,4 +545,96 @@ fn filter_vocal_range(pitches: &mut [PitchPoint], min_hz: f64, max_hz: f64) {
             max_hz
         );
     }
+}
+
+/// Apply bandpass filter (cascaded high-pass + low-pass) to isolate vocal frequency range
+/// Uses 4th-order IIR (two 2nd-order passes) for effective instrument leakage removal
+fn apply_bandpass_filter(input: &[f32], sample_rate: u32, low_hz: f64, high_hz: f64) -> Vec<f32> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+
+    let len = input.len();
+    let dt = 1.0 / sample_rate as f64;
+
+    // High-pass filter (2 passes for 4th order)
+    let rc_hp = 1.0 / (2.0 * std::f64::consts::PI * low_hz);
+    let alpha_hp = rc_hp / (rc_hp + dt);
+
+    let mut hp = vec![0.0f64; len];
+    hp[0] = input[0] as f64;
+    for i in 1..len {
+        hp[i] = alpha_hp * (hp[i - 1] + input[i] as f64 - input[i - 1] as f64);
+    }
+    // 2nd pass
+    let mut hp2 = vec![0.0f64; len];
+    hp2[0] = hp[0];
+    for i in 1..len {
+        hp2[i] = alpha_hp * (hp2[i - 1] + hp[i] - hp[i - 1]);
+    }
+
+    // Low-pass filter (2 passes for 4th order)
+    let rc_lp = 1.0 / (2.0 * std::f64::consts::PI * high_hz);
+    let alpha_lp = dt / (rc_lp + dt);
+
+    let mut lp = vec![0.0f64; len];
+    lp[0] = hp2[0];
+    for i in 1..len {
+        lp[i] = lp[i - 1] + alpha_lp * (hp2[i] - lp[i - 1]);
+    }
+    // 2nd pass
+    let mut result = vec![0.0f32; len];
+    let mut prev = lp[0];
+    for i in 0..len {
+        prev = prev + alpha_lp * (lp[i] - prev);
+        result[i] = prev as f32;
+    }
+
+    result
+}
+
+/// RMS-based noise gate: zero out frames where local RMS is below threshold
+/// window_ms: analysis window size in milliseconds
+fn rms_gate(input: &[f32], sample_rate: u32, threshold: f32, window_ms: usize) -> Vec<f32> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+
+    let window_samples = (sample_rate as usize * window_ms) / 1000;
+    let half_window = window_samples / 2;
+    let len = input.len();
+    let mut output = input.to_vec();
+
+    // Compute running RMS and gate
+    let mut gated_samples = 0usize;
+    let step = window_samples / 2; // hop by half window
+    let mut gate_mask = vec![false; len]; // true = pass through
+
+    let mut pos = 0;
+    while pos < len {
+        let start = pos.saturating_sub(half_window);
+        let end = (pos + half_window).min(len);
+        let segment = &input[start..end];
+        let rms: f32 = (segment.iter().map(|&s| s * s).sum::<f32>() / segment.len().max(1) as f32).sqrt();
+
+        if rms >= threshold {
+            // Mark this window region as active
+            for j in start..end {
+                gate_mask[j] = true;
+            }
+        }
+        pos += step;
+    }
+
+    for i in 0..len {
+        if !gate_mask[i] {
+            output[i] = 0.0;
+            gated_samples += 1;
+        }
+    }
+
+    let pct = gated_samples as f64 / len as f64 * 100.0;
+    log::info!("RMS gate: zeroed {}/{} samples ({:.1}%)", gated_samples, len, pct);
+
+    output
 }

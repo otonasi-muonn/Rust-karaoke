@@ -68,11 +68,18 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
         // This model requires exact chunk size of 131072 samples (~2.97s at 44100Hz)
         // due to its STFT/iSTFT architecture constraints
         let chunk_size: usize = 131072;
-        let overlap = chunk_size / 4; // 25% overlap for smooth crossfade
+        let overlap = chunk_size / 2; // 50% overlap for high-quality crossfade
         let total_len = pcm.len();
+
+        // Pre-compute Hann window weights for crossfade
+        let mut window = vec![0.0f32; chunk_size];
+        for i in 0..chunk_size {
+            window[i] = (std::f32::consts::PI * i as f32 / chunk_size as f32).sin().powi(2);
+        }
 
         let mut vocal = vec![0.0f32; total_len];
         let mut accompaniment = vec![0.0f32; total_len];
+        let mut weight_sum = vec![0.0f32; total_len];
 
         let mut pos = 0usize;
         let mut chunk_idx = 0usize;
@@ -101,7 +108,7 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
 
             let ndim = shape.len();
 
-            // Copy results with crossfade in overlap regions (only up to actual audio length)
+            // Overlap-add with Hann window weighting
             let copy_len = actual_len;
             for i in 0..copy_len {
                 let global_idx = pos + i;
@@ -109,12 +116,7 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
                     break;
                 }
 
-                // Linear crossfade for overlapping regions
-                let fade = if pos > 0 && i < overlap {
-                    i as f32 / overlap as f32
-                } else {
-                    1.0
-                };
+                let w = window[i];
 
                 let (vocal_val, acc_val) = if ndim == 3 {
                     let v = output_view.get([0, 0, i]).copied().unwrap_or(0.0);
@@ -129,14 +131,13 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
                     (0.0, 0.0)
                 };
 
-                vocal[global_idx] =
-                    vocal[global_idx] * (1.0 - fade) + vocal_val * fade;
-                accompaniment[global_idx] =
-                    accompaniment[global_idx] * (1.0 - fade) + acc_val * fade;
+                vocal[global_idx] += vocal_val * w;
+                accompaniment[global_idx] += acc_val * w;
+                weight_sum[global_idx] += w;
             }
 
             chunk_idx += 1;
-            if chunk_idx % 3 == 0 || pos + chunk_size >= total_len {
+            if chunk_idx % 5 == 0 || pos + chunk_size >= total_len {
                 log::info!(
                     "BS-RoFormer progress: {:.1}% (chunk {})",
                     ((pos + chunk_size).min(total_len) as f64 / total_len as f64) * 100.0,
@@ -145,6 +146,14 @@ pub fn separate(pcm: &[f32], sample_rate: u32) -> Result<(Vec<f32>, Vec<f32>)> {
             }
 
             pos += chunk_size - overlap;
+        }
+
+        // Normalize by overlap-add weights
+        for i in 0..total_len {
+            if weight_sum[i] > 0.0 {
+                vocal[i] /= weight_sum[i];
+                accompaniment[i] /= weight_sum[i];
+            }
         }
 
         // Log RMS for both channels to verify which is vocal vs accompaniment
